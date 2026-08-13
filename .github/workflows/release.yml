@@ -68,7 +68,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: pnpm
 
       - name: Install dependencies
@@ -79,9 +79,17 @@ jobs:
         run: |
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
           echo "$VERSION" > .version
+          cat package.json | grep version
+          ls -la
 
       - name: Build (${{ matrix.browser }})
         run: pnpm wxt zip -b ${{ matrix.browser }} --mode production
+
+      - name: List output directory
+        run: |
+          ls -la .output/
+          echo "---"
+          ls -la .output/**/*.zip 2>/dev/null || echo "No zips in subdirs"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
