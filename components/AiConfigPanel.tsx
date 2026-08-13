@@ -1,7 +1,27 @@
 import { useEffect, useState } from 'react';
+import { Plus, Trash2 } from 'lucide-react';
 import { DEFAULT_AI_CONFIGS } from '@/utils/aiConfig';
 import type { AiConfig } from '@/utils/aiConfig';
-import ToggleSwitch from './ToggleSwitch';
+import { Button } from './ui/button';
+import { Input } from './ui/input';
+import { Switch } from './ui/switch';
+import { Checkbox } from './ui/checkbox';
+import { Label } from './ui/label';
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from './ui/select';
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from './ui/table';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 
@@ -19,16 +39,10 @@ export default function AiConfigPanel({
     storage.getItem(AI_CONFIGS_KEY).then((data) => {
       setAiConfigs((data as AiConfig[]) ?? DEFAULT_AI_CONFIGS);
     });
-    // 回答完成提醒开关（默认开启）
     storage.getItem('local:notifyOnDone').then((v) => {
       if (typeof v === 'boolean') setNotifyOnDone(v);
     });
   }, []);
-
-  const toggleNotify = async (checked: boolean) => {
-    setNotifyOnDone(checked);
-    await storage.setItem('local:notifyOnDone', checked);
-  };
 
   const updateConfig = async (id: string, updates: Partial<AiConfig>) => {
     const updated = aiConfigs.map((ai) =>
@@ -58,62 +72,107 @@ export default function AiConfigPanel({
     storage.setItem(AI_CONFIGS_KEY, updated);
   };
 
+  const toggleNotify = async (checked: boolean) => {
+    setNotifyOnDone(checked);
+    await storage.setItem('local:notifyOnDone', checked);
+  };
+
   return (
-    <div className="panel">
-      <h2>AI 配置</h2>
-      <div className="setting-row">
-        <span>打开方式</span>
-        <select
-          value={openMode}
-          onChange={(e) => onModeChange(e.target.value as 'tabs' | 'windows')}
-        >
-          <option value="tabs">标签页</option>
-          <option value="windows">独立窗口</option>
-        </select>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
+        <h2 className="text-base font-semibold tracking-tight">AI 配置</h2>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">打开方式</Label>
+          <Select
+            value={openMode}
+            onValueChange={(v) => onModeChange(v as 'tabs' | 'windows')}
+          >
+            <SelectTrigger className="w-[130px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="tabs">标签页</SelectItem>
+              <SelectItem value="windows">独立窗口</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">回答完成提醒</Label>
+          <Switch checked={notifyOnDone} onCheckedChange={toggleNotify} />
+        </div>
       </div>
-      <div className="setting-row">
-        <span>回答完成提醒</span>
-        <ToggleSwitch checked={notifyOnDone} onChange={toggleNotify} />
+
+      <div className="rounded-lg border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-[110px]">AI 名称</TableHead>
+              <TableHead>地址</TableHead>
+              <TableHead className="w-[76px] text-center">自动发送</TableHead>
+              <TableHead className="w-[56px] text-center">启用</TableHead>
+              <TableHead className="w-[40px]" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {aiConfigs.map((ai) => (
+              <TableRow key={ai.id}>
+                <TableCell>
+                  <Input
+                    className="h-7 px-2 text-sm"
+                    value={ai.name}
+                    onChange={(e) =>
+                      updateConfig(ai.id, { name: e.target.value })
+                    }
+                  />
+                </TableCell>
+                <TableCell>
+                  <Input
+                    className="h-7 px-2 text-sm"
+                    placeholder="https://example.com/?q={query}"
+                    value={ai.url}
+                    onChange={(e) =>
+                      updateConfig(ai.id, { url: e.target.value })
+                    }
+                  />
+                </TableCell>
+                <TableCell className="text-center">
+                  <Checkbox
+                    checked={ai.autoSend}
+                    onCheckedChange={(v) =>
+                      updateConfig(ai.id, { autoSend: v === true })
+                    }
+                  />
+                </TableCell>
+                <TableCell className="text-center">
+                  <Switch
+                    checked={ai.enabled}
+                    onCheckedChange={(checked) =>
+                      updateConfig(ai.id, { enabled: checked })
+                    }
+                  />
+                </TableCell>
+                <TableCell>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => removeAi(ai.id)}
+                    aria-label="删除"
+                  >
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       </div>
-      <div className="ai-list">
-        {aiConfigs.map((ai) => (
-          <div className="ai-card" key={ai.id}>
-            <div className="ai-card-header">
-              <input
-                className="ai-name"
-                value={ai.name}
-                onChange={(e) => updateConfig(ai.id, { name: e.target.value })}
-              />
-              <ToggleSwitch
-                checked={ai.enabled}
-                onChange={(checked) => updateConfig(ai.id, { enabled: checked })}
-              />
-              <button className="delete-btn" onClick={() => removeAi(ai.id)}>
-                ✕
-              </button>
-            </div>
-            <input
-              className="ai-url"
-              placeholder="https://example.com/?q={query}"
-              value={ai.url}
-              onChange={(e) => updateConfig(ai.id, { url: e.target.value })}
-            />
-            <label className="auto-send-label">
-              <input
-                type="checkbox"
-                checked={ai.autoSend}
-                onChange={(e) =>
-                  updateConfig(ai.id, { autoSend: e.target.checked })
-                }
-              />
-              自动发送
-            </label>
-          </div>
-        ))}
-      </div>
-      <button className="add-btn" onClick={addAi}>
-        + 添加 AI
-      </button>
+
+      <Button size="sm" className="self-start" onClick={addAi}>
+        <Plus className="h-4 w-4" />
+        添加 AI
+      </Button>
     </div>
   );
 }
