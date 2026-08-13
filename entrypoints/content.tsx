@@ -1,58 +1,84 @@
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import FloatingPanel from '@/components/FloatingPanel';
+
 export default defineContentScript({
   matches: ['<all_urls>'],
   main() {
-    let floatBtn: HTMLDivElement | null = null;
+    let container: HTMLDivElement | null = null;
+    let root: ReactDOM.Root | null = null;
+    let lastText = '';
 
     document.addEventListener('mouseup', (event) => {
-      const text = window.getSelection()?.toString().trim();
-      if (text && text.length > 0) {
-        showButton(event.clientX, event.clientY, text);
+      const target = event.target as Node;
+      if (container && container.contains(target)) return;
+
+      const selection = window.getSelection();
+      const text = selection?.toString().trim();
+      if (text && text.length > 0 && selection && selection.rangeCount > 0) {
+        if (container && lastText !== text) {
+          hidePanel();
+        }
+        lastText = text;
+        // 以划词的包围矩形为锚点，让弹窗紧贴选中文字
+        const rect = selection.getRangeAt(0).getBoundingClientRect();
+        const anchorX =
+          rect.left + rect.width / 2 || (event.clientX ?? 0);
+        const anchorY = rect.bottom || (event.clientY ?? 0);
+        showPanel(anchorX, anchorY, text);
       } else {
-        hideButton();
+        hidePanel();
       }
     });
 
-    function showButton(x: number, y: number, text: string) {
-      if (!floatBtn) {
-        floatBtn = document.createElement('div');
-        floatBtn.className = 'multi-ai-float-btn';
-        floatBtn.textContent = '🤖 多 AI 提问';
-        floatBtn.style.cssText = `
+    function showPanel(x: number, y: number, text: string) {
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'askall-floating-panel-host';
+        container.style.cssText = `
           position: fixed;
+          top: 0;
+          left: 0;
+          width: 0;
+          height: 0;
           z-index: 2147483647;
-          background: #2563eb;
-          color: #fff;
-          padding: 6px 10px;
-          border-radius: 8px;
-          font-size: 13px;
-          cursor: pointer;
-          box-shadow: 0 4px 12px rgba(0,0,0,.2);
-          user-select: none;
         `;
-        document.body.appendChild(floatBtn);
+        document.body.appendChild(container);
+        root = ReactDOM.createRoot(container);
       }
-      floatBtn.style.left = `${x}px`;
-      floatBtn.style.top = `${y + 12}px`;
-      floatBtn.dataset.text = text;
 
-      floatBtn.onclick = () => {
-        const t = floatBtn!.dataset.text!;
-        navigator.clipboard?.writeText(t).catch(() => {});
-        browser.runtime.sendMessage({ type: 'ASK_AI', text: t });
-        hideButton();
-      };
+      const panelWidth = 280;
+      const panelHeight = 380;
+      const gap = 16;
+      const left = Math.max(8, Math.min(x, window.innerWidth - panelWidth - 8));
+      // 优先在鼠标下方展开，空间不足时自动移到上方
+      const spaceBelow = window.innerHeight - (y + gap) - 8;
+      const top =
+        spaceBelow >= panelHeight
+          ? y + gap
+          : Math.max(8, y - panelHeight - gap);
+
+      root?.render(
+        <FloatingPanel
+          text={text}
+          onClose={hidePanel}
+          position={{ left, top }}
+        />,
+      );
     }
 
-    function hideButton() {
-      if (floatBtn) {
-        floatBtn.remove();
-        floatBtn = null;
+    function hidePanel() {
+      if (container) {
+        root?.unmount();
+        container.remove();
+        container = null;
+        root = null;
       }
     }
 
     document.addEventListener('mousedown', (e) => {
-      if (floatBtn && !floatBtn.contains(e.target as Node)) {
-        hideButton();
+      if (container && !container.contains(e.target as Node)) {
+        hidePanel();
       }
     });
   },

@@ -28,16 +28,33 @@ export default defineBackground(() => {
     }
   });
 
-  // 监听内容脚本消息（划词浮动按钮 + 回答完成）
+  // 监听内容脚本消息（划词浮动面板 + 回答完成 + 打开设置）
   browser.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'ASK_AI' && msg.text) {
-      handleAsk(msg.text);
+      handleAsk(msg.text, msg.aiIds);
+      return;
+    }
+    if (msg?.type === 'ASK_AI_FOLLOWUP' && msg.text) {
+      handleFollowUp(msg.text, msg.aiIds);
       return;
     }
     if (msg?.type === 'AI_REPLY_DONE' && msg.aiName) {
       notifyReplyDone(msg.aiName);
+      return;
+    }
+    if (msg?.type === 'OPEN_SETTINGS') {
+      openSettingsPage();
+      return;
     }
   });
+
+  async function openSettingsPage() {
+    try {
+      await browser.runtime.openOptionsPage();
+    } catch (e) {
+      console.warn('[multi-ai-ask] 打开设置页失败:', e);
+    }
+  }
 
   const NOTIFY_KEY = 'local:notifyOnDone';
 
@@ -132,7 +149,7 @@ export default defineBackground(() => {
     tabTrack.delete(tabId);
   });
 
-  async function handleAsk(text: string) {
+  async function handleAsk(text: string, aiIds?: string[]) {
     const aiConfigs =
       ((await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null) ??
       DEFAULT_AI_CONFIGS;
@@ -140,7 +157,13 @@ export default defineBackground(() => {
       ((await storage.getItem(OPEN_MODE_KEY)) as 'tabs' | 'windows' | null) ??
       'tabs';
 
-    const enabledList = aiConfigs.filter((ai) => ai.enabled && ai.url);
+    const enabledList = aiConfigs.filter((ai) => {
+      if (!ai.enabled || !ai.url) return false;
+      if (Array.isArray(aiIds) && aiIds.length > 0) {
+        return aiIds.includes(ai.id);
+      }
+      return true;
+    });
     if (enabledList.length === 0) return;
 
     const question = text.trim();
@@ -203,6 +226,43 @@ export default defineBackground(() => {
     }
     return ai.url;
   }
+
+  /**
+   * 追问：把新问题直接注入到已打开的 AI 聊天标签页/窗口，避免重复新建。
+   * 若对应 AI 没有已打开的窗口，则回退到默认的新建流程。
+   */
+  async function handleFollowUp(text: string, aiIds?: string[]) {
+    const aiConfigs =
+      ((await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null) ??
+      DEFAULT_AI_CONFIGS;
+    const question = text.trim();
+    if (!question) return;
+
+    const targets = aiConfigs.filter((ai) => {
+      if (!ai.enabled || !ai.url) return false;
+      if (Array.isArray(aiIds) && aiIds.length > 0) {
+        return aiIds.includes(ai.id);
+      }
+      return true;
+    });
+    if (targets.length === 0) return;
+
+    // 复用已打开的同域聊天窗口（同一 AI 的标签页）
+    const reused: string[] = [];
+    for (const [tabId, track] of tabTrack) {
+      const ai = targets.find((t) => t.id === track.aiId);
+      if (!ai || !ai.selectors) continue;
+      reused.push(ai.id);
+      injectAutoSend(tabId, question, ai.selectors, ai.name);
+    }
+
+    // 没有可复用的窗口，按默认流程新建
+    const missed = targets.filter((ai) => !reused.includes(ai.id));
+    if (missed.length > 0) {
+      await handleAsk(question, missed.map((ai) => ai.id));
+    }
+  }
+
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

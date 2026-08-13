@@ -24,5 +24,9 @@ export default defineConfig({
     action: {
       default_title: 'AskAll 齐问',
     },
+    options_ui: {
+      page: 'options.html',
+      open_in_tab: false,
+    },
   },
 });
