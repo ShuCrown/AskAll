@@ -1,7 +1,14 @@
 name: Build & Release Extension
 
-# 手动触发：在 Actions 页面点击 "Run workflow" 打包 Chrome / Firefox
+# 触发方式：
+#   1. push 到 main 分支且 version.json 有改动时，自动打包 Chrome / Firefox
+#   2. 手动触发：在 Actions 页面点击 "Run workflow" 打包 Chrome / Firefox
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - version.json
   workflow_dispatch:
 
 permissions:
