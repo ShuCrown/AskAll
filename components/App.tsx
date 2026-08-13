@@ -8,6 +8,11 @@ import { cn } from '@/lib/utils';
 export default function App() {
   const [activeTab, setActiveTab] = useState<'config' | 'history'>('config');
   const [openMode, setOpenMode] = useState<'tabs' | 'windows'>('tabs');
+  const [version, setVersion] = useState('');
+
+  useEffect(() => {
+    setVersion(browser.runtime.getManifest().version);
+  }, []);
 
   useEffect(() => {
     storage.getItem('local:openMode').then((data) => {
@@ -21,7 +26,10 @@ export default function App() {
   };
 
   return (
-    <div className="app-container">
+    <div className="app-container relative">
+      <span className="absolute bottom-1 right-2 select-none text-[10px] leading-none text-muted-foreground/60">
+        v{version}
+      </span>
       <aside className="flex w-[180px] shrink-0 flex-col gap-1 overflow-y-auto border-r bg-card p-3">
         <div className="mb-2 flex items-center gap-2 px-2 py-1.5">
           <Bot className="h-5 w-5 text-primary" />

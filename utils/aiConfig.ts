@@ -90,9 +90,9 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
     },
   },
   {
-    id: 'kimi',
-    name: 'Kimi',
-    url: 'https://kimi.moonshot.cn/',
+    id: 'wenxin',
+    name: '文心一言',
+    url: 'https://yiyan.baidu.com/',
     enabled: true,
     autoSend: true,
     selectors: {

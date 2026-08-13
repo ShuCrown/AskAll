@@ -17,7 +17,7 @@ export default defineConfig({
     host_permissions: [
       'https://chat.deepseek.com/*',
       'https://www.doubao.com/*',
-      'https://kimi.moonshot.cn/*',
+      'https://yiyan.baidu.com/*',
       'https://tongyi.aliyun.com/*',
       // 新增 AI 网站时，需在此追加对应的 host 权限（executeScript 注入需要）
     ],
