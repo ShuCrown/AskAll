@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Settings } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Settings, X } from 'lucide-react';
+import { mergeConfigs } from '@/utils/aiConfig';
 import type { AiConfig } from '@/utils/aiConfig';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
@@ -25,11 +26,98 @@ export default function FloatingPanel({
   const [showAfterSend, setShowAfterSend] = useState(true);
   const [autoSend, setAutoSend] = useState(false);
   const [followUp, setFollowUp] = useState('');
+  const [replies, setReplies] = useState<Record<string, string>>({});
   const sentRef = useRef(false);
+
+  // 拖拽位置 & 四边调整大小
+  const [pos, setPos] = useState(position ?? { left: 100, top: 100 });
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const dragRef = useRef<{
+    type: 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null;
+    startX: number;
+    startY: number;
+    origLeft: number;
+    origTop: number;
+    origWidth: number;
+    origHeight: number;
+  }>({ type: null, startX: 0, startY: 0, origLeft: 0, origTop: 0, origWidth: 0, origHeight: 0 });
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  const startDrag = useCallback(
+    (
+      type: 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw',
+      e: React.MouseEvent,
+    ) => {
+      if ((e.target as HTMLElement).closest('button')) return;
+      const card = cardRef.current;
+      if (!card) return;
+      dragRef.current = {
+        type,
+        startX: e.clientX,
+        startY: e.clientY,
+        origLeft: pos.left,
+        origTop: pos.top,
+        origWidth: card.offsetWidth,
+        origHeight: card.offsetHeight,
+      };
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [pos],
+  );
+
+  useEffect(() => {
+    const minW = 240;
+    const minH = 200;
+    const onMouseMove = (e: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d.type) return;
+      const dx = e.clientX - d.startX;
+      const dy = e.clientY - d.startY;
+
+      if (d.type === 'move') {
+        setPos({
+          left: Math.max(0, Math.min(d.origLeft + dx, window.innerWidth - 60)),
+          top: Math.max(0, Math.min(d.origTop + dy, window.innerHeight - 40)),
+        });
+        return;
+      }
+
+      let { origLeft, origTop, origWidth, origHeight } = d;
+      const dir = d.type;
+
+      if (dir.includes('e')) origWidth = Math.max(minW, d.origWidth + dx);
+      if (dir.includes('s')) origHeight = Math.max(minH, d.origHeight + dy);
+      if (dir.includes('w')) {
+        const newW = Math.max(minW, d.origWidth - dx);
+        origLeft = d.origLeft + (d.origWidth - newW);
+        origWidth = newW;
+      }
+      if (dir.includes('n')) {
+        const newH = Math.max(minH, d.origHeight - dy);
+        origTop = d.origTop + (d.origHeight - newH);
+        origHeight = newH;
+      }
+
+      setSize({ width: origWidth, height: origHeight });
+      setPos({ left: origLeft, top: origTop });
+    };
+    const onMouseUp = () => {
+      dragRef.current.type = null;
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
 
   useEffect(() => {
     storage.getItem(AI_CONFIGS_KEY).then((data) => {
-      const configs = (data as AiConfig[]) ?? [];
+      // 合并默认配置：确保所有未禁用的默认 Chat 都展示
+      const stored = data as AiConfig[] | null;
+      const configs = mergeConfigs(stored);
       setAiConfigs(configs);
       storage.getItem('local:selectAllByDefault').then((selectAll) => {
         const shouldSelectAll =
@@ -40,16 +128,15 @@ export default function FloatingPanel({
         );
       });
     });
-    storage.getItem(DEFAULT_PANEL_KEY).then((v) => {
-      if (v === 'result' || v === 'select') {
-        setView(v as PanelView);
-      }
-    });
     storage.getItem('local:showResultAfterSend').then((v) => {
       if (typeof v === 'boolean') setShowAfterSend(v);
     });
     storage.getItem(AUTO_SEND_KEY).then((v) => {
-      if (typeof v === 'boolean') setAutoSend(v);
+      const val = typeof v === 'boolean' ? v : false;
+      setAutoSend(val);
+      // 视图由自动发送开关决定：开启→直接进结果面板；关闭→显示选择面板。
+      // 避免关闭自动发送后，仍被之前写入的 defaultFloatingPanel='result' 直接带到结果面板。
+      setView(val ? 'result' : 'select');
     });
   }, []);
 
@@ -68,9 +155,33 @@ export default function FloatingPanel({
     storage.setItem(DEFAULT_PANEL_KEY, 'result');
   }, [autoSend, aiConfigs]);
 
+  // 结果面板轮询拉取各 AI 的最新回复
+  useEffect(() => {
+    if (view !== 'result') return;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const fetchReplies = async () => {
+      try {
+        const res = await browser.runtime.sendMessage({ type: 'GET_REPLIES' });
+        if (res?.replies) setReplies(res.replies);
+      } catch {
+        /* ignore */
+      }
+    };
+    fetchReplies();
+    timer = setInterval(fetchReplies, 3000);
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [view]);
+
   const toggleAutoSend = async (checked: boolean) => {
     await storage.setItem(AUTO_SEND_KEY, checked);
     setAutoSend(checked);
+    // 关闭自动发送时回到选择面板，避免停留在结果面板
+    if (!checked) {
+      setView('select');
+      storage.setItem(DEFAULT_PANEL_KEY, 'select');
+    }
   };
 
   const toggleAi = (id: string) => {
@@ -146,8 +257,19 @@ export default function FloatingPanel({
   return (
     <div style={styles.overlay} onClick={(e) => e.stopPropagation()}>
       <style>{panelCss}</style>
-      <div style={{ ...styles.card, ...(position ? { left: position.left, top: position.top } : {}) }}>
-        <div style={styles.header}>
+      <div
+        ref={cardRef}
+        style={{
+          ...styles.card,
+          left: pos.left,
+          top: pos.top,
+          ...(view === 'result' ? { width: 560 } : {}),
+          ...(size.width ? { width: size.width } : {}),
+          ...(size.height ? { height: size.height } : {}),
+        }}
+      >
+        {/* 顶部标题栏：可拖动 */}
+        <div style={styles.header} onMouseDown={(e) => startDrag('move', e)}>
           <div style={styles.title}>
             <span style={styles.logo}>齐</span>
             <span>齐问</span>
@@ -155,14 +277,16 @@ export default function FloatingPanel({
           <button
             type="button"
             style={styles.iconBtn}
-            onClick={openSettings}
-            aria-label="设置"
-            title="设置"
+            onClick={onClose}
+            aria-label="关闭"
+            title="关闭"
           >
-            <Settings style={{ width: 16, height: 16 }} />
+            <X style={{ width: 16, height: 16 }} />
           </button>
         </div>
 
+        {/* 中间内容区：可滚动 */}
+        <div style={styles.body}>
         {view === 'select' ? (
           <>
             <div style={styles.countRow}>
@@ -209,7 +333,7 @@ export default function FloatingPanel({
                           ...(selected ? styles.aiIconSelected : {}),
                         }}
                       >
-                        {aiIcon(ai.name)}
+                        <AiIcon ai={ai} />
                       </span>
                       {ai.name}
                     </span>
@@ -226,30 +350,91 @@ export default function FloatingPanel({
                 );
               })}
             </div>
-            <button
-              type="button"
-              style={{
-                ...styles.sendBtn,
-                opacity: selectedList.length === 0 ? 0.6 : 1,
-              }}
-              onClick={handleSend}
-              disabled={selectedList.length === 0}
-            >
-              开始提问
-            </button>
-            <div style={styles.hint}>Enter 发送，Esc 关闭</div>
           </>
         ) : (
           <>
-            <div style={styles.composeBox}>
+            <div style={styles.questionBox}>
+              <div style={styles.questionLabel}>我的问题</div>
+              <div style={styles.questionText}>{text}</div>
+            </div>
+            <div style={styles.resultHeader}>
+              <span style={styles.resultTitle}>全部回答</span>
+            </div>
+            <div style={styles.resultList}>
+              {selectedList.map((ai) => {
+                const reply = replies[ai.name];
+                return (
+                  <div key={ai.id} style={styles.resultItem}>
+                    <div style={styles.resultName}>
+                      <span style={styles.aiIcon}><AiIcon ai={ai} /></span>
+                      {ai.name}
+                      <a
+                        href={buildUrl(ai)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={styles.resultLink}
+                      >
+                        查看原文
+                      </a>
+                    </div>
+                    {reply ? (
+                      <div style={styles.resultText}>{reply}</div>
+                    ) : (
+                      <div style={styles.resultStatus}>
+                        未能获取回复，点击上方「查看原文」前往平台
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+        </div>
+
+        {/* 底部栏：设置 + 发送/输入 */}
+        <div style={styles.footer}>
+          <button
+            type="button"
+            style={styles.footerSettingsBtn}
+            onClick={openSettings}
+            aria-label="设置"
+            title="设置"
+          >
+            <Settings style={{ width: 16, height: 16 }} />
+          </button>
+          {view === 'select' ? (
+            <>
+              <input
+                readOnly
+                placeholder="Enter 发送，Esc 关闭"
+                style={styles.footerInput}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSend();
+                }}
+              />
+              <button
+                type="button"
+                style={{
+                  ...styles.sendBtn,
+                  opacity: selectedList.length === 0 ? 0.6 : 1,
+                }}
+                onClick={handleSend}
+                disabled={selectedList.length === 0}
+              >
+                开始提问
+              </button>
+            </>
+          ) : (
+            <>
               <input
                 value={followUp}
                 onChange={(e) => setFollowUp(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleFollowUpSend();
                 }}
-                placeholder="输入新的问题，向已打开的聊天窗口发送…"
-                style={styles.composeInput}
+                placeholder="输入追加问题，向已打开的聊天窗口发送…"
+                style={styles.footerInput}
               />
               <button
                 type="button"
@@ -259,65 +444,107 @@ export default function FloatingPanel({
               >
                 发送
               </button>
-            </div>
-            <div style={styles.questionBox}>
-              <div style={styles.questionLabel}>我的问题</div>
-              <div style={styles.questionText}>{text}</div>
-            </div>
-            <div style={styles.resultHeader}>
-              <span style={styles.resultTitle}>全部回答</span>
-            </div>
-            <div style={styles.resultList}>
-              {selectedList.map((ai) => (
-                <a
-                  key={ai.id}
-                  href={buildUrl(ai)}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={styles.resultItem}
-                >
-                  <div style={styles.resultName}>
-                    <span style={styles.aiIcon}>{aiIcon(ai.name)}</span>
-                    {ai.name}
-                  </div>
-                  <div style={styles.resultStatus}>已向 {ai.name} 发送，点击查看</div>
-                </a>
-              ))}
-            </div>
-            <div style={styles.resultActions}>
-              <button
-                type="button"
-                style={styles.secondaryBtn}
-                onClick={() => {
-                  setView('select');
-                  storage.setItem(DEFAULT_PANEL_KEY, 'select');
-                }}
-              >
-                返回选择
-              </button>
-              <button type="button" style={styles.sendBtn} onClick={onClose}>
-                关闭
-              </button>
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
+
+        {/* 四边 + 四角拖拽缩放 */}
+        <div style={styles.resizeN} onMouseDown={(e) => startDrag('n', e)} />
+        <div style={styles.resizeS} onMouseDown={(e) => startDrag('s', e)} />
+        <div style={styles.resizeE} onMouseDown={(e) => startDrag('e', e)} />
+        <div style={styles.resizeW} onMouseDown={(e) => startDrag('w', e)} />
+        <div style={styles.resizeNE} onMouseDown={(e) => startDrag('ne', e)} />
+        <div style={styles.resizeNW} onMouseDown={(e) => startDrag('nw', e)} />
+        <div style={styles.resizeSE} onMouseDown={(e) => startDrag('se', e)} />
+        <div style={styles.resizeSW} onMouseDown={(e) => startDrag('sw', e)} />
       </div>
     </div>
   );
 }
 
-function aiIcon(name: string) {
-  const lower = name.toLowerCase();
-  if (lower.includes('chatgpt') || lower.includes('gpt')) return '🟢 ';
-  if (lower.includes('claude')) return '🟤 ';
-  if (lower.includes('gemini')) return '🔵 ';
-  if (lower.includes('deepseek')) return '🔷 ';
-  if (lower.includes('通义') || lower.includes('千问') || lower.includes('qwen'))
-    return '🟣 ';
-  if (lower.includes('文心')) return '🔶 ';
-  if (lower.includes('豆包')) return '🟡 ';
-  if (lower.includes('kimi')) return '🌙 ';
-  return '🤖 ';
+/** 内置 AI 图标资源映射（public/ai 下），key 为内置平台的 id */
+const AI_ICON_FILES: Record<string, string> = {
+  deepseek: 'deepseek.svg',
+  doubao: 'doubao.svg',
+  wenxin: 'wenxin.svg',
+  qwen: 'qianwen.svg',
+};
+
+/** 渲染单个 AI 图标：优先使用 public/ai 下的官方图标，加载失败则回退到品牌色徽标 */
+function AiIcon({ ai }: { ai: AiConfig }) {
+  const [failed, setFailed] = useState(false);
+  const file = AI_ICON_FILES[ai.id];
+
+  if (file && !failed) {
+    const src = (browser.runtime.getURL as (p: string) => string)(
+      `/ai/${file}`,
+    );
+    return (
+      <span
+        title={ai.name}
+        style={{
+          width: 18,
+          height: 18,
+          borderRadius: 5,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+          userSelect: 'none',
+          overflow: 'hidden',
+        }}
+      >
+        <img
+          src={src}
+          alt={ai.name}
+          width={18}
+          height={18}
+          style={{ width: 18, height: 18, objectFit: 'contain' }}
+          onError={() => setFailed(true)}
+        />
+      </span>
+    );
+  }
+
+  const ch = (ai.name || 'AI').trim().charAt(0) || 'AI';
+  const color = brandColor(ai.name);
+  return (
+    <span
+      title={ai.name}
+      style={{
+        width: 18,
+        height: 18,
+        borderRadius: 5,
+        background: color,
+        color: '#fff',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 11,
+        fontWeight: 700,
+        lineHeight: 1,
+        flexShrink: 0,
+        userSelect: 'none',
+      }}
+    >
+      {ch}
+    </span>
+  );
+}
+
+/** 根据 AI 名称返回对应品牌色，未知名称使用中性灰 */
+function brandColor(name: string): string {
+  const l = name.toLowerCase();
+  if (l.includes('deepseek')) return '#4D6BFE';
+  if (l.includes('豆包') || l.includes('doubao')) return '#00C8FF';
+  if (l.includes('通义') || l.includes('千问') || l.includes('qwen'))
+    return '#615CED';
+  if (l.includes('文心')) return '#2E2E2E';
+  if (l.includes('chatgpt') || l.includes('gpt')) return '#10A37F';
+  if (l.includes('claude')) return '#D97757';
+  if (l.includes('gemini')) return '#4285F4';
+  if (l.includes('kimi')) return '#333333';
+  return '#6b7280';
 }
 
 const panelCss = `
@@ -349,12 +576,59 @@ const styles: Record<string, React.CSSProperties> = {
     pointerEvents: 'auto',
     display: 'flex',
     flexDirection: 'column',
-    gap: 10,
+    gap: 0,
+    overflow: 'hidden',
   },
   header: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
+    cursor: 'move',
+    userSelect: 'none',
+    flexShrink: 0,
+    paddingBottom: 10,
+  },
+  body: {
+    flex: 1,
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+    minHeight: 0,
+    // 默认（未手动缩放）时限制最大高度，避免面板超出视口；缩放增高后列表可随 body 一起增高
+    maxHeight: 'calc(100vh - 160px)',
+  },
+  footer: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 0,
+    paddingTop: 10,
+    borderTop: '1px solid hsl(220 13% 91%)',
+    marginTop: 10,
+  },
+  footerSettingsBtn: {
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    padding: 4,
+    borderRadius: 6,
+    color: 'hsl(220 8.9% 46.1%)',
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+  },
+  footerInput: {
+    flex: 1,
+    minWidth: 0,
+    height: 34,
+    padding: '0 10px',
+    borderRadius: 8,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(0 0% 100%)',
+    fontSize: 13,
+    color: 'hsl(224 71.4% 4.1%)',
+    outline: 'none',
   },
   title: {
     display: 'flex',
@@ -437,7 +711,9 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: 4,
-    maxHeight: 260,
+    // 占据 body 剩余空间：面板增高时 AI 平台列表随之增高，超高时内部滚动
+    flex: 1,
+    minHeight: 0,
     overflowY: 'auto',
   },
   item: {
@@ -461,8 +737,8 @@ const styles: Record<string, React.CSSProperties> = {
   aiIcon: {
     fontSize: 13,
     lineHeight: 1,
-    filter: 'grayscale(0.4)',
-    opacity: 0.6,
+    display: 'flex',
+    alignItems: 'center',
   },
   aiIconSelected: {
     filter: 'none',
@@ -490,8 +766,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
   },
   sendBtn: {
-    width: '100%',
-    padding: '9px 0',
+    padding: '0 16px',
+    height: 34,
     borderRadius: 8,
     border: 'none',
     background: 'hsl(221.2 83.2% 53.3%)',
@@ -500,6 +776,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     cursor: 'pointer',
     transition: 'background 0.15s',
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
   },
   hint: {
     textAlign: 'center',
@@ -565,7 +843,9 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: 8,
-    maxHeight: 220,
+    // 占据 body 剩余空间，随面板高度自适应
+    flex: 1,
+    minHeight: 0,
     overflowY: 'auto',
   },
   resultItem: {
@@ -573,10 +853,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 10,
     borderRadius: 8,
     border: '1px solid hsl(220 13% 91%)',
-    textDecoration: 'none',
     color: 'inherit',
-    cursor: 'pointer',
-    transition: 'background 0.15s',
   },
   resultName: {
     fontWeight: 600,
@@ -586,6 +863,22 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 6,
     color: 'hsl(224 71.4% 4.1%)',
+  },
+  resultLink: {
+    marginLeft: 'auto',
+    fontSize: 12,
+    fontWeight: 500,
+    color: 'hsl(221.2 83.2% 53.3%)',
+    textDecoration: 'none',
+  },
+  resultText: {
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: 'hsl(224 71.4% 4.1%)',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    maxHeight: 160,
+    overflowY: 'auto',
   },
   resultStatus: {
     fontSize: 12,
@@ -604,5 +897,77 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'hsl(224 71.4% 4.1%)',
     fontSize: 14,
     cursor: 'pointer',
+  },
+  resizeN: {
+    position: 'absolute',
+    top: -2,
+    left: 8,
+    right: 8,
+    height: 6,
+    cursor: 'ns-resize',
+    pointerEvents: 'auto',
+  },
+  resizeS: {
+    position: 'absolute',
+    bottom: -2,
+    left: 8,
+    right: 8,
+    height: 6,
+    cursor: 'ns-resize',
+    pointerEvents: 'auto',
+  },
+  resizeE: {
+    position: 'absolute',
+    right: -2,
+    top: 8,
+    bottom: 8,
+    width: 6,
+    cursor: 'ew-resize',
+    pointerEvents: 'auto',
+  },
+  resizeW: {
+    position: 'absolute',
+    left: -2,
+    top: 8,
+    bottom: 8,
+    width: 6,
+    cursor: 'ew-resize',
+    pointerEvents: 'auto',
+  },
+  resizeNE: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    width: 12,
+    height: 12,
+    cursor: 'nesw-resize',
+    pointerEvents: 'auto',
+  },
+  resizeNW: {
+    position: 'absolute',
+    top: -2,
+    left: -2,
+    width: 12,
+    height: 12,
+    cursor: 'nwse-resize',
+    pointerEvents: 'auto',
+  },
+  resizeSE: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 12,
+    height: 12,
+    cursor: 'nwse-resize',
+    pointerEvents: 'auto',
+  },
+  resizeSW: {
+    position: 'absolute',
+    bottom: -2,
+    left: -2,
+    width: 12,
+    height: 12,
+    cursor: 'nesw-resize',
+    pointerEvents: 'auto',
   },
 };

@@ -1,4 +1,4 @@
-import { DEFAULT_AI_CONFIGS } from '@/utils/aiConfig';
+import { DEFAULT_AI_CONFIGS, mergeConfigs } from '@/utils/aiConfig';
 import type { AiConfig } from '@/utils/aiConfig';
 import { autoFillAndSend } from '@/utils/autoSend';
 import { addHistory, updateHistoryUrl } from '@/utils/history';
@@ -16,14 +16,28 @@ export default defineBackground(() => {
     }
     browser.contextMenus.create({
       id: MENU_ID,
-      title: '向多个 AI 提问：%s',
+      title: 'AskAll 齐问：打开提问面板',
       contexts: ['selection'],
     });
   });
 
-  // 右键菜单点击
-  browser.contextMenus.onClicked.addListener((info) => {
-    if (info.menuItemId === MENU_ID && info.selectionText) {
+  // 右键菜单点击：向当前页面的内容脚本发送消息，打开浮动面板
+  browser.contextMenus.onClicked.addListener(async (info) => {
+    if (info.menuItemId !== MENU_ID || !info.selectionText) return;
+    const tabs = await browser.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    const tabId = tabs[0]?.id;
+    if (tabId == null) return;
+    try {
+      await browser.tabs.sendMessage(tabId, {
+        type: 'SHOW_PANEL',
+        text: info.selectionText,
+      });
+    } catch (e) {
+      // 内容脚本未注入（浏览器内部页/受限页面）时，回退为直接发送
+      console.warn('[multi-ai-ask] 无法打开面板，回退为直接提问:', e);
       handleAsk(info.selectionText);
     }
   });
@@ -38,7 +52,16 @@ export default defineBackground(() => {
       handleFollowUp(msg.text, msg.aiIds);
       return;
     }
+    if (msg?.type === 'AI_REPLY' && msg.aiName) {
+      // 更新该 AI 的最新回复（供结果面板轮询展示）
+      aiReplies.set(msg.aiName, msg.text ?? '');
+      return;
+    }
+    if (msg?.type === 'GET_REPLIES') {
+      return { replies: Object.fromEntries(aiReplies) };
+    }
     if (msg?.type === 'AI_REPLY_DONE' && msg.aiName) {
+      if (msg.text) aiReplies.set(msg.aiName, msg.text);
       notifyReplyDone(msg.aiName);
       return;
     }
@@ -57,6 +80,9 @@ export default defineBackground(() => {
   }
 
   const NOTIFY_KEY = 'local:notifyOnDone';
+
+  // 各 AI 最新回复缓存（aiName -> 回复文本），供浮动结果面板轮询展示
+  const aiReplies = new Map<string, string>();
 
   /** 回答完成提醒：检查全局开关后弹系统通知 */
   async function notifyReplyDone(aiName: string) {
@@ -150,9 +176,10 @@ export default defineBackground(() => {
   });
 
   async function handleAsk(text: string, aiIds?: string[]) {
-    const aiConfigs =
-      ((await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null) ??
-      DEFAULT_AI_CONFIGS;
+    // 合并最新默认配置，确保内置平台使用最新的选择器（存储可能是旧数据）
+    const aiConfigs = mergeConfigs(
+      (await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null,
+    );
     const openMode =
       ((await storage.getItem(OPEN_MODE_KEY)) as 'tabs' | 'windows' | null) ??
       'tabs';
@@ -181,42 +208,47 @@ export default defineBackground(() => {
       aiUrls,
     );
 
-    if (openMode === 'windows') {
-      enabledList.forEach((ai, index) => {
-        const url = buildUrl(ai, question);
+    let winIndex = 0;
+    for (const ai of enabledList) {
+      // 需要自动发送的平台：优先复用已打开的「原有」聊天窗口，直接输入内容并自动发送，避免重复新建
+      if (ai.autoSend && ai.selectors) {
+        const existing = await findExistingChatTab(ai);
+        if (existing) {
+          injectAutoSend(existing.tabId, question, ai.selectors, ai.name);
+          continue;
+        }
+      }
+
+      // 否则新建标签页/窗口
+      const url = buildUrl(ai, question);
+      const open = (tabId: number) => {
+        trackTab(tabId, historyItem.id, ai.id, ai.name, url);
+        if (ai.autoSend && ai.selectors) {
+          injectAutoSend(tabId, question, ai.selectors, ai.name);
+        }
+      };
+      if (openMode === 'windows') {
         browser.windows
           .create({
             url,
             type: 'popup',
             width: 520,
             height: 760,
-            left: 80 + index * 40,
-            top: 80 + index * 40,
+            left: 80 + winIndex * 40,
+            top: 80 + winIndex * 40,
           })
           .then((win) => {
             const tabId = win?.tabs?.[0]?.id;
-            if (tabId != null) {
-              trackTab(tabId, historyItem.id, ai.id, ai.name, url);
-              if (ai.autoSend && ai.selectors) {
-                injectAutoSend(tabId, question, ai.selectors, ai.name);
-              }
-            }
+            if (tabId != null) open(tabId);
           });
-      });
-    } else {
-      enabledList.forEach((ai) => {
-        const url = buildUrl(ai, question);
+      } else {
         browser.tabs
           .create({ url, active: false })
           .then((tab) => {
-            if (tab.id != null) {
-              trackTab(tab.id, historyItem.id, ai.id, ai.name, url);
-              if (ai.autoSend && ai.selectors) {
-                injectAutoSend(tab.id, question, ai.selectors, ai.name);
-              }
-            }
+            if (tab.id != null) open(tab.id);
           });
-      });
+      }
+      winIndex++;
     }
   }
 
@@ -228,13 +260,42 @@ export default defineBackground(() => {
   }
 
   /**
+   * 查找某个 AI 已打开的聊天标签页（跨后台会话也能命中）。
+   * 匹配依据是该 AI 配置 URL 的源（origin），返回已加载完成的标签页。
+   */
+  async function findExistingChatTab(
+    ai: AiConfig,
+  ): Promise<{ tabId: number } | undefined> {
+    try {
+      const origin = getOrigin(ai.url);
+      if (!origin) return undefined;
+      const tabs = await browser.tabs.query({ url: `${origin}/*` });
+      const ready = tabs.find((t) => t.id != null && t.status === 'complete');
+      if (ready && ready.id != null) return { tabId: ready.id };
+      if (tabs[0]?.id != null) return { tabId: tabs[0].id };
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function getOrigin(url: string): string | null {
+    try {
+      // 去除可能存在的 {query} 占位符后再解析源
+      return new URL(url.replace(/\{query\}/g, '')).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 追问：把新问题直接注入到已打开的 AI 聊天标签页/窗口，避免重复新建。
    * 若对应 AI 没有已打开的窗口，则回退到默认的新建流程。
    */
   async function handleFollowUp(text: string, aiIds?: string[]) {
-    const aiConfigs =
-      ((await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null) ??
-      DEFAULT_AI_CONFIGS;
+    const aiConfigs = mergeConfigs(
+      (await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null,
+    );
     const question = text.trim();
     if (!question) return;
 
@@ -247,17 +308,20 @@ export default defineBackground(() => {
     });
     if (targets.length === 0) return;
 
-    // 复用已打开的同域聊天窗口（同一 AI 的标签页）
-    const reused: string[] = [];
-    for (const [tabId, track] of tabTrack) {
-      const ai = targets.find((t) => t.id === track.aiId);
-      if (!ai || !ai.selectors) continue;
-      reused.push(ai.id);
-      injectAutoSend(tabId, question, ai.selectors, ai.name);
+    // 优先复用已打开的「原有」聊天窗口（通过 tabs.query 跨后台会话也能命中），
+    // 直接输入问题并自动发送，避免重新新建标签页/窗口。
+    const reused = new Set<string>();
+    for (const ai of targets) {
+      if (!ai.autoSend || !ai.selectors || reused.has(ai.id)) continue;
+      const existing = await findExistingChatTab(ai);
+      if (existing) {
+        reused.add(ai.id);
+        injectAutoSend(existing.tabId, question, ai.selectors, ai.name);
+      }
     }
 
-    // 没有可复用的窗口，按默认流程新建
-    const missed = targets.filter((ai) => !reused.includes(ai.id));
+    // 没有可复用窗口的平台，回退到新建流程
+    const missed = targets.filter((ai) => !reused.has(ai.id));
     if (missed.length > 0) {
       await handleAsk(question, missed.map((ai) => ai.id));
     }

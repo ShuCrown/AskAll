@@ -25,12 +25,33 @@ export interface AiConfig {
   autoSend: boolean;
   /** 自动发送所需的 DOM 选择器 */
   selectors?: AiSelectors;
+  /** 默认内置配置，不可编辑/删除，仅支持启停 */
+  isDefault?: boolean;
 }
 
 /**
  * 默认 AI 配置。注意：不同 AI 网站的 DOM 结构经常变化，
  * 实际使用时可在设置面板中调整选择器。
  */
+
+/**
+ * 合并默认配置与存储配置。
+ * 内置项始终以最新 DEFAULT_AI_CONFIGS 为准（含最新选择器），
+ * 仅保留用户的启停状态；自定义项原样保留。
+ */
+export function mergeConfigs(stored: AiConfig[] | null): AiConfig[] {
+  if (!stored) return DEFAULT_AI_CONFIGS;
+  const defaultIds = DEFAULT_AI_CONFIGS.map((d) => d.id);
+  const userConfigs = stored.filter((c) => !defaultIds.includes(c.id));
+  return [
+    ...DEFAULT_AI_CONFIGS.map((d) => {
+      const existing = stored.find((c) => c.id === d.id);
+      return existing ? { ...d, enabled: existing.enabled } : d;
+    }),
+    ...userConfigs,
+  ];
+}
+
 export const DEFAULT_AI_CONFIGS: AiConfig[] = [
   {
     id: 'deepseek',
@@ -38,6 +59,7 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
     url: 'https://chat.deepseek.com/',
     enabled: true,
     autoSend: true,
+    isDefault: true,
     selectors: {
       input: 'textarea',
       inputCandidates: ['textarea', 'div[contenteditable="true"]'],
@@ -63,13 +85,14 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
     url: 'https://www.doubao.com/chat/',
     enabled: true,
     autoSend: true,
+    isDefault: true,
     selectors: {
-      input: 'textarea',
+      input: 'textarea.semi-input-textarea-autosize',
       inputCandidates: [
+        'textarea.semi-input-textarea-autosize',
+        'textarea[placeholder]',
         'textarea',
         'div[contenteditable="true"]',
-        'div[class*="input"]',
-        'div[class*="editor"]',
         'div[role="textbox"]',
       ],
       sendButton: '#flow-end-msg-send',
@@ -95,24 +118,26 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
     url: 'https://yiyan.baidu.com/',
     enabled: true,
     autoSend: true,
+    isDefault: true,
     selectors: {
-      input: 'textarea',
+      input: 'textarea#chat-textarea',
       inputCandidates: [
+        'textarea#chat-textarea',
+        'textarea.ci-textarea',
+        'textarea[placeholder]',
         'textarea',
         'div[contenteditable="true"]',
-        'div[class*="input"]',
-        'div[class*="editor"]',
         'div[role="textbox"]',
       ],
-      sendButton: 'button[type="submit"]',
+      sendButton: 'span.ci-submit-button',
       sendButtonCandidates: [
+        'span.ci-submit-button',
+        'span[class*="submit-button"]',
+        '#ci-submit-button-ai',
         'button[type="submit"]',
         'button[class*="send"]',
-        'button[class*="submit"]',
         'div[role="button"]',
         'button:has(svg)',
-        'button[aria-label*="发送"]',
-        'button[aria-label*="Send"]',
       ],
       replyCandidates: [
         '[class*="markdown"]',
@@ -127,24 +152,24 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
     url: 'https://tongyi.aliyun.com/qianwen/',
     enabled: true,
     autoSend: true,
+    isDefault: true,
     selectors: {
-      input: 'textarea',
+      input: 'div[contenteditable="true"][role="textbox"]',
       inputCandidates: [
-        'textarea',
+        'div[contenteditable="true"][role="textbox"]',
         'div[contenteditable="true"]',
-        'div[class*="input"]',
-        'div[class*="editor"]',
         'div[role="textbox"]',
+        'textarea',
+        'div[class*="editor"]',
       ],
-      sendButton: 'button[type="submit"]',
+      sendButton: 'button[aria-label="发送消息"]',
       sendButtonCandidates: [
+        'button[aria-label="发送消息"]',
+        'button[aria-label*="发送"]',
         'button[type="submit"]',
         'button[class*="send"]',
-        'button[class*="submit"]',
         'div[role="button"]',
         'button:has(svg)',
-        'button[aria-label*="发送"]',
-        'button[aria-label*="Send"]',
       ],
       replyCandidates: [
         '[class*="markdown"]',

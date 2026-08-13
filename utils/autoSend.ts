@@ -13,7 +13,11 @@ import type { AiSelectors } from '@/utils/aiConfig';
  */
 declare const chrome: {
   runtime: {
-    sendMessage: (message: { type: string; aiName?: string }) => void;
+    sendMessage: (message: {
+      type: string;
+      aiName?: string;
+      text?: string;
+    }) => void;
   };
 };
 export async function autoFillAndSend(
@@ -161,6 +165,7 @@ export async function autoFillAndSend(
               chrome.runtime.sendMessage({
                 type: 'AI_REPLY_DONE',
                 aiName: name,
+                text: text.slice(0, 4000), // 限制长度避免消息过大
               });
             } catch {
               /* 消息发送失败忽略（页面关闭等场景） */
@@ -170,6 +175,16 @@ export async function autoFillAndSend(
         } else {
           stableCount = 0;
           lastText = text;
+          // 流式输出过程中持续同步最新回复文本到后台
+          try {
+            chrome.runtime.sendMessage({
+              type: 'AI_REPLY',
+              aiName: name,
+              text: text.slice(0, 4000),
+            });
+          } catch {
+            /* ignore */
+          }
         }
       } else {
         // 回复尚未开始（或思考中/发送失败），重置基线

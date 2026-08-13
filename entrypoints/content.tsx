@@ -7,29 +7,63 @@ export default defineContentScript({
   main() {
     let container: HTMLDivElement | null = null;
     let root: ReactDOM.Root | null = null;
-    let lastText = '';
 
-    document.addEventListener('mouseup', (event) => {
-      const target = event.target as Node;
-      if (container && container.contains(target)) return;
-
-      const selection = window.getSelection();
-      const text = selection?.toString().trim();
-      if (text && text.length > 0 && selection && selection.rangeCount > 0) {
-        if (container && lastText !== text) {
-          hidePanel();
-        }
-        lastText = text;
-        // 以划词的包围矩形为锚点，让弹窗紧贴选中文字
-        const rect = selection.getRangeAt(0).getBoundingClientRect();
-        const anchorX =
-          rect.left + rect.width / 2 || (event.clientX ?? 0);
-        const anchorY = rect.bottom || (event.clientY ?? 0);
-        showPanel(anchorX, anchorY, text);
-      } else {
-        hidePanel();
+    // 划词后是否自动弹出面板（默认关闭，可在设置中开启）
+    storage.getItem('local:showOnSelect').then((v) => {
+      if (v === true) {
+        document.addEventListener('mouseup', onMouseUp);
       }
     });
+
+    // 可配置快捷键（默认 Alt+Q，可在设置中修改）
+    storage.getItem('local:shortcut').then((v) => {
+      const shortcut = typeof v === 'string' && v.trim() ? v.trim() : 'Alt+Q';
+      document.addEventListener('keydown', (e) => {
+        // 输入框内不响应，避免干扰正常打字
+        const t = e.target as HTMLElement | null;
+        if (
+          t &&
+          (t.tagName === 'INPUT' ||
+            t.tagName === 'TEXTAREA' ||
+            t.isContentEditable)
+        ) {
+          return;
+        }
+        if (matchesShortcut(e, shortcut)) {
+          e.preventDefault();
+          openPanelForSelection();
+        }
+      });
+    });
+
+    // 右键菜单/其他入口调用：显示面板
+    browser.runtime.onMessage.addListener((msg) => {
+      if (msg?.type === 'SHOW_PANEL') {
+        openPanelForSelection(typeof msg.text === 'string' ? msg.text : undefined);
+      }
+    });
+
+    function onMouseUp(event: MouseEvent) {
+      const target = event.target as Node;
+      if (container && container.contains(target)) return;
+      openPanelForSelection();
+    }
+
+    /** 用当前选中文本（或显式传入的文本）打开面板，并紧贴选中文字定位 */
+    function openPanelForSelection(explicitText?: string) {
+      const selection = window.getSelection();
+      const text = (explicitText ?? selection?.toString() ?? '').trim();
+      if (!text) return;
+
+      const rect =
+        selection && selection.rangeCount > 0
+          ? selection.getRangeAt(0).getBoundingClientRect()
+          : null;
+      // 以选中文字包围矩形的下边中点作为锚点
+      const anchorX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+      const anchorY = rect ? rect.bottom : window.innerHeight / 2;
+      showPanel(anchorX, anchorY, text);
+    }
 
     function showPanel(x: number, y: number, text: string) {
       if (!container) {
@@ -49,9 +83,8 @@ export default defineContentScript({
 
       const panelWidth = 280;
       const panelHeight = 380;
-      const gap = 16;
+      const gap = 8;
       const left = Math.max(8, Math.min(x, window.innerWidth - panelWidth - 8));
-      // 优先在鼠标下方展开，空间不足时自动移到上方
       const spaceBelow = window.innerHeight - (y + gap) - 8;
       const top =
         spaceBelow >= panelHeight
@@ -83,3 +116,24 @@ export default defineContentScript({
     });
   },
 });
+
+/** 判断按键事件是否匹配配置的快捷键（如 "Alt+Q"、"Ctrl+Shift+K"） */
+function matchesShortcut(e: KeyboardEvent, shortcut: string): boolean {
+  const parts = shortcut
+    .split('+')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (parts.length === 0) return false;
+  const key = parts[parts.length - 1];
+  const mods = parts.slice(0, -1);
+  const wantCtrl = mods.includes('ctrl');
+  const wantAlt = mods.includes('alt');
+  const wantShift = mods.includes('shift');
+  const wantMeta = mods.includes('meta') || mods.includes('cmd');
+
+  if (!!e.ctrlKey !== wantCtrl) return false;
+  if (!!e.altKey !== wantAlt) return false;
+  if (!!e.shiftKey !== wantShift) return false;
+  if (!!e.metaKey !== wantMeta) return false;
+  return e.key.toLowerCase() === key;
+}

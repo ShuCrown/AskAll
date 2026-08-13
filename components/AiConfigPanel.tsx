@@ -38,10 +38,27 @@ export default function AiConfigPanel({
   const [selectAllByDefault, setSelectAllByDefault] = useState(true);
   const [defaultPanel, setDefaultPanel] = useState<'select' | 'result'>('select');
   const [autoSend, setAutoSend] = useState(false);
+  const [showOnSelect, setShowOnSelect] = useState(false);
+  const [shortcut, setShortcut] = useState('Alt+Q');
 
   useEffect(() => {
     storage.getItem(AI_CONFIGS_KEY).then((data) => {
-      setAiConfigs((data as AiConfig[]) ?? DEFAULT_AI_CONFIGS);
+      const stored = data as AiConfig[] | null;
+      if (!stored) {
+        setAiConfigs(DEFAULT_AI_CONFIGS);
+        return;
+      }
+      // 合并默认配置：确保内置项始终存在且标记为 isDefault
+      const defaultIds = DEFAULT_AI_CONFIGS.map((d) => d.id);
+      const userConfigs = stored.filter((c) => !defaultIds.includes(c.id));
+      const merged = [
+        ...DEFAULT_AI_CONFIGS.map((d) => {
+          const existing = stored.find((c) => c.id === d.id);
+          return existing ? { ...d, enabled: existing.enabled } : d;
+        }),
+        ...userConfigs,
+      ];
+      setAiConfigs(merged);
     });
     storage.getItem('local:notifyOnDone').then((v) => {
       if (typeof v === 'boolean') setNotifyOnDone(v);
@@ -57,6 +74,12 @@ export default function AiConfigPanel({
     });
     storage.getItem('local:autoSend').then((v) => {
       if (typeof v === 'boolean') setAutoSend(v);
+    });
+    storage.getItem('local:showOnSelect').then((v) => {
+      if (typeof v === 'boolean') setShowOnSelect(v);
+    });
+    storage.getItem('local:shortcut').then((v) => {
+      if (typeof v === 'string' && v.trim()) setShortcut(v);
     });
   }, []);
 
@@ -108,6 +131,17 @@ export default function AiConfigPanel({
     await storage.setItem('local:autoSend', checked);
   };
 
+  const toggleShowOnSelect = async (checked: boolean) => {
+    setShowOnSelect(checked);
+    await storage.setItem('local:showOnSelect', checked);
+  };
+
+  const saveShortcut = async (value: string) => {
+    const v = value.trim();
+    setShortcut(v);
+    await storage.setItem('local:shortcut', v || 'Alt+Q');
+  };
+
   const changeDefaultPanel = async (panel: 'select' | 'result') => {
     setDefaultPanel(panel);
     await storage.setItem('local:defaultFloatingPanel', panel);
@@ -150,6 +184,21 @@ export default function AiConfigPanel({
         </div>
 
         <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">划词自动弹出面板</Label>
+          <Switch checked={showOnSelect} onCheckedChange={toggleShowOnSelect} />
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">快捷键</Label>
+          <Input
+            className="h-7 w-[130px] px-2 text-sm"
+            placeholder="Alt+Q"
+            value={shortcut}
+            onChange={(e) => saveShortcut(e.target.value)}
+          />
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
           <Label className="text-sm text-muted-foreground">默认全选 AI</Label>
           <Switch checked={selectAllByDefault} onCheckedChange={toggleSelectAll} />
         </div>
@@ -189,6 +238,7 @@ export default function AiConfigPanel({
                   <Input
                     className="h-7 px-2 text-sm"
                     value={ai.name}
+                    disabled={ai.isDefault}
                     onChange={(e) =>
                       updateConfig(ai.id, { name: e.target.value })
                     }
@@ -199,6 +249,7 @@ export default function AiConfigPanel({
                     className="h-7 px-2 text-sm"
                     placeholder="https://example.com/?q={query}"
                     value={ai.url}
+                    disabled={ai.isDefault}
                     onChange={(e) =>
                       updateConfig(ai.id, { url: e.target.value })
                     }
@@ -207,6 +258,7 @@ export default function AiConfigPanel({
                 <TableCell className="text-center">
                   <Checkbox
                     checked={ai.autoSend}
+                    disabled={ai.isDefault}
                     onCheckedChange={(v) =>
                       updateConfig(ai.id, { autoSend: v === true })
                     }
@@ -221,14 +273,16 @@ export default function AiConfigPanel({
                   />
                 </TableCell>
                 <TableCell>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => removeAi(ai.id)}
-                    aria-label="删除"
-                  >
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  </Button>
+                  {!ai.isDefault && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => removeAi(ai.id)}
+                      aria-label="删除"
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
