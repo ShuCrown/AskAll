@@ -28,16 +28,29 @@ export default defineBackground(() => {
     }
   });
 
-  // 监听内容脚本消息（划词浮动按钮 + 回答完成）
+  // 监听内容脚本消息（划词浮动面板 + 回答完成 + 打开设置）
   browser.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'ASK_AI' && msg.text) {
-      handleAsk(msg.text);
+      handleAsk(msg.text, msg.aiIds);
       return;
     }
     if (msg?.type === 'AI_REPLY_DONE' && msg.aiName) {
       notifyReplyDone(msg.aiName);
+      return;
+    }
+    if (msg?.type === 'OPEN_SETTINGS') {
+      openSettingsPage();
+      return;
     }
   });
+
+  async function openSettingsPage() {
+    try {
+      await browser.runtime.openOptionsPage();
+    } catch (e) {
+      console.warn('[multi-ai-ask] 打开设置页失败:', e);
+    }
+  }
 
   const NOTIFY_KEY = 'local:notifyOnDone';
 
@@ -132,7 +145,7 @@ export default defineBackground(() => {
     tabTrack.delete(tabId);
   });
 
-  async function handleAsk(text: string) {
+  async function handleAsk(text: string, aiIds?: string[]) {
     const aiConfigs =
       ((await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null) ??
       DEFAULT_AI_CONFIGS;
@@ -140,7 +153,13 @@ export default defineBackground(() => {
       ((await storage.getItem(OPEN_MODE_KEY)) as 'tabs' | 'windows' | null) ??
       'tabs';
 
-    const enabledList = aiConfigs.filter((ai) => ai.enabled && ai.url);
+    const enabledList = aiConfigs.filter((ai) => {
+      if (!ai.enabled || !ai.url) return false;
+      if (Array.isArray(aiIds) && aiIds.length > 0) {
+        return aiIds.includes(ai.id);
+      }
+      return true;
+    });
     if (enabledList.length === 0) return;
 
     const question = text.trim();

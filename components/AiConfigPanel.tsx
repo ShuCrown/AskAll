@@ -34,6 +34,9 @@ export default function AiConfigPanel({
 }) {
   const [aiConfigs, setAiConfigs] = useState<AiConfig[]>([]);
   const [notifyOnDone, setNotifyOnDone] = useState(true);
+  const [showResultAfterSend, setShowResultAfterSend] = useState(true);
+  const [selectAllByDefault, setSelectAllByDefault] = useState(true);
+  const [defaultPanel, setDefaultPanel] = useState<'select' | 'result'>('select');
 
   useEffect(() => {
     storage.getItem(AI_CONFIGS_KEY).then((data) => {
@@ -41,6 +44,15 @@ export default function AiConfigPanel({
     });
     storage.getItem('local:notifyOnDone').then((v) => {
       if (typeof v === 'boolean') setNotifyOnDone(v);
+    });
+    storage.getItem('local:showResultAfterSend').then((v) => {
+      if (typeof v === 'boolean') setShowResultAfterSend(v);
+    });
+    storage.getItem('local:selectAllByDefault').then((v) => {
+      if (typeof v === 'boolean') setSelectAllByDefault(v);
+    });
+    storage.getItem('local:defaultFloatingPanel').then((v) => {
+      if (v === 'select' || v === 'result') setDefaultPanel(v);
     });
   }, []);
 
@@ -77,6 +89,21 @@ export default function AiConfigPanel({
     await storage.setItem('local:notifyOnDone', checked);
   };
 
+  const toggleShowResult = async (checked: boolean) => {
+    setShowResultAfterSend(checked);
+    await storage.setItem('local:showResultAfterSend', checked);
+  };
+
+  const toggleSelectAll = async (checked: boolean) => {
+    setSelectAllByDefault(checked);
+    await storage.setItem('local:selectAllByDefault', checked);
+  };
+
+  const changeDefaultPanel = async (panel: 'select' | 'result') => {
+    setDefaultPanel(panel);
+    await storage.setItem('local:defaultFloatingPanel', panel);
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-2">
@@ -101,6 +128,32 @@ export default function AiConfigPanel({
         <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
           <Label className="text-sm text-muted-foreground">回答完成提醒</Label>
           <Switch checked={notifyOnDone} onCheckedChange={toggleNotify} />
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">发送后显示结果面板</Label>
+          <Switch checked={showResultAfterSend} onCheckedChange={toggleShowResult} />
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">默认全选 AI</Label>
+          <Switch checked={selectAllByDefault} onCheckedChange={toggleSelectAll} />
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">默认浮动面板</Label>
+          <Select
+            value={defaultPanel}
+            onValueChange={(v) => changeDefaultPanel(v as 'select' | 'result')}
+          >
+            <SelectTrigger className="w-[130px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="select">选择模型</SelectItem>
+              <SelectItem value="result">结果面板</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
