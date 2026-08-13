@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "release_notes": {
+    "zh-CN": "初始发布：支持划词向多个 AI 平台提问，自动发送并记录历史。",
+    "en": "Initial release: select text and ask multiple AI platforms at once, with auto-send and history."
+  }
+}
