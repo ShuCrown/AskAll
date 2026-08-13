@@ -13,12 +13,22 @@ export default function AiConfigPanel({
   onModeChange: (mode: 'tabs' | 'windows') => void;
 }) {
   const [aiConfigs, setAiConfigs] = useState<AiConfig[]>([]);
+  const [notifyOnDone, setNotifyOnDone] = useState(true);
 
   useEffect(() => {
     storage.getItem(AI_CONFIGS_KEY).then((data) => {
       setAiConfigs((data as AiConfig[]) ?? DEFAULT_AI_CONFIGS);
     });
+    // 回答完成提醒开关（默认开启）
+    storage.getItem('local:notifyOnDone').then((v) => {
+      if (typeof v === 'boolean') setNotifyOnDone(v);
+    });
   }, []);
+
+  const toggleNotify = async (checked: boolean) => {
+    setNotifyOnDone(checked);
+    await storage.setItem('local:notifyOnDone', checked);
+  };
 
   const updateConfig = async (id: string, updates: Partial<AiConfig>) => {
     const updated = aiConfigs.map((ai) =>
@@ -60,6 +70,10 @@ export default function AiConfigPanel({
           <option value="tabs">标签页</option>
           <option value="windows">独立窗口</option>
         </select>
+      </div>
+      <div className="setting-row">
+        <span>回答完成提醒</span>
+        <ToggleSwitch checked={notifyOnDone} onChange={toggleNotify} />
       </div>
       <div className="ai-list">
         {aiConfigs.map((ai) => (

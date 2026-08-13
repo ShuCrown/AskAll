@@ -20,7 +20,7 @@ export default function App() {
   return (
     <div className="app-container">
       <aside className="sidebar">
-        <h1 className="logo">🤖 Multi AI Ask</h1>
+        <h1 className="logo">🤖 AskAll 齐问</h1>
         <nav>
           <button
             className={`nav-item ${activeTab === 'config' ? 'active' : ''}`}

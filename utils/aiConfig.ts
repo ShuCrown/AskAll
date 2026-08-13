@@ -7,6 +7,12 @@ export interface AiSelectors {
   sendButton?: string;
   /** 发送按钮候选选择器（按顺序尝试） */
   sendButtonCandidates?: string[];
+  /**
+   * AI 回复块候选选择器（按顺序尝试，取最后一个匹配元素）。
+   * 用于「回答完成提醒」：轮询该元素文本，连续稳定即视为回答结束。
+   * 注意：不要匹配到输入框（textarea/input），否则文本恒为问题内容会误报。
+   */
+  replyCandidates?: string[];
 }
 
 export interface AiConfig {
@@ -43,6 +49,12 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
         'button[aria-label*="发送"]',
         'button[aria-label*="Send"]',
       ],
+      replyCandidates: [
+        '.ds-markdown',
+        '[class*="markdown"]',
+        '[class*="answer"]',
+        '[class*="response"]',
+      ],
     },
   },
   {
@@ -68,6 +80,12 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
         'button[type="submit"]',
         'div[role="button"]',
         'button:has(svg)',
+      ],
+      replyCandidates: [
+        '[class*="markdown"]',
+        '[class*="answer"]',
+        '[class*="response"]',
+        '[class*="message"] div[class*="text"]',
       ],
     },
   },
@@ -96,6 +114,11 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
         'button[aria-label*="发送"]',
         'button[aria-label*="Send"]',
       ],
+      replyCandidates: [
+        '[class*="markdown"]',
+        '[class*="answer"]',
+        '[class*="response"]',
+      ],
     },
   },
   {
@@ -122,6 +145,11 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
         'button:has(svg)',
         'button[aria-label*="发送"]',
         'button[aria-label*="Send"]',
+      ],
+      replyCandidates: [
+        '[class*="markdown"]',
+        '[class*="answer"]',
+        '[class*="response"]',
       ],
     },
   },
