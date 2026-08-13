@@ -85,17 +85,26 @@ jobs:
       - name: Build (${{ matrix.browser }})
         run: pnpm wxt zip -b ${{ matrix.browser }} --mode production
 
-      - name: List output directory
+      # 定位实际生成的 zip（无论 wxt 默认命名成什么），校验存在后重命名为固定名称，
+      # 避免 .output/*.zip 通配符匹配不到或匹配不一致的问题
+      - name: Locate & rename zip
         run: |
+          if ! ls .output/*.zip >/dev/null 2>&1; then
+            echo "::error::No zip file found in .output/. Listing contents:"
+            ls -la .output/
+            exit 1
+          fi
+          zip_file=$(ls .output/*.zip | head -n1)
+          echo "Found zip: $zip_file"
+          mv "$zip_file" ".output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip"
+          echo "Renamed to: .output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip"
           ls -la .output/
-          echo "---"
-          ls -la .output/**/*.zip 2>/dev/null || echo "No zips in subdirs"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: extension-${{ matrix.browser }}-${{ env.VERSION }}
-          path: .output/*.zip
+          path: .output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip
           if-no-files-found: error
 
   # ============================================================
