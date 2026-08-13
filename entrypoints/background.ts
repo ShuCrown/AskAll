@@ -69,6 +69,11 @@ export default defineBackground(() => {
       openSettingsPage();
       return;
     }
+    // 查看原文：优先切换到该 AI 已打开的聊天标签页，找不到才新开
+    if (msg?.type === 'OPEN_AI_TAB' && msg.url) {
+      openAiTab(msg.url);
+      return;
+    }
   });
 
   async function openSettingsPage() {
@@ -285,6 +290,30 @@ export default defineBackground(() => {
       return new URL(url.replace(/\{query\}/g, '')).origin;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * 查看原文：优先切换到该 AI 已打开的聊天标签页（按 origin 匹配），
+   * 找不到才新建标签页。避免每次「查看原文」都新开一个窗口。
+   */
+  async function openAiTab(url: string) {
+    try {
+      const origin = getOrigin(url);
+      if (origin) {
+        const tabs = await browser.tabs.query({ url: `${origin}/*` });
+        const ready = tabs.find((t) => t.id != null && t.status === 'complete');
+        const target = ready || tabs[0];
+        if (target?.id != null) {
+          await browser.tabs.update(target.id, { active: true });
+          await browser.windows.update(target.windowId, { focused: true });
+          return;
+        }
+      }
+      // 没有已打开的标签页，新建一个
+      await browser.tabs.create({ url, active: true });
+    } catch (e) {
+      console.warn('[multi-ai-ask] 打开 AI 标签页失败:', e);
     }
   }
 

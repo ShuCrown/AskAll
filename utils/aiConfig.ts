@@ -63,8 +63,11 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
     selectors: {
       input: 'textarea',
       inputCandidates: ['textarea', 'div[contenteditable="true"]'],
-      sendButton: 'button[type="submit"]',
+      sendButton: 'div[role="button"][aria-label*="发送"]',
       sendButtonCandidates: [
+        'div[role="button"][aria-label*="发送"]',
+        'div[role="button"][aria-label*="Send"]',
+        'div.ds-chat-footer div[role="button"]',
         'button[type="submit"]',
         'button:has(svg)',
         'div[role="button"]',
@@ -115,7 +118,7 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
   {
     id: 'wenxin',
     name: '文心一言',
-    url: 'https://yiyan.baidu.com/',
+    url: 'https://wenxin.baidu.com/',
     enabled: true,
     autoSend: true,
     isDefault: true,
@@ -129,11 +132,14 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
         'div[contenteditable="true"]',
         'div[role="textbox"]',
       ],
-      sendButton: 'span.ci-submit-button',
+      sendButton: 'button.ci-input-send-btn',
       sendButtonCandidates: [
+        'button.ci-input-send-btn',
+        'button[aria-label*="发送"]',
+        'button[aria-label*="Send"]',
+        '#ci-submit-button-ai',
         'span.ci-submit-button',
         'span[class*="submit-button"]',
-        '#ci-submit-button-ai',
         'button[type="submit"]',
         'button[class*="send"]',
         'div[role="button"]',
@@ -149,7 +155,7 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
   {
     id: 'qwen',
     name: '通义千问',
-    url: 'https://tongyi.aliyun.com/qianwen/',
+    url: 'https://www.qianwen.com/',
     enabled: true,
     autoSend: true,
     isDefault: true,

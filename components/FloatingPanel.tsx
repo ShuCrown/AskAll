@@ -221,6 +221,11 @@ export default function FloatingPanel({
     browser.runtime.sendMessage({ type: 'OPEN_SETTINGS' });
   };
 
+  // 查看原文：让后台切换到该 AI 已打开的聊天标签页，找不到才新开
+  const openAiTab = (ai: AiConfig) => {
+    browser.runtime.sendMessage({ type: 'OPEN_AI_TAB', url: buildUrl(ai) });
+  };
+
   // 在结果面板手动输入新的问题，直接向已打开的聊天窗口发送，不新建标签页/弹窗
   const handleFollowUpSend = () => {
     const q = followUp.trim();
@@ -370,8 +375,10 @@ export default function FloatingPanel({
                       {ai.name}
                       <a
                         href={buildUrl(ai)}
-                        target="_blank"
-                        rel="noreferrer"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          openAiTab(ai);
+                        }}
                         style={styles.resultLink}
                       >
                         查看原文

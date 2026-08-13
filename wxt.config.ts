@@ -6,6 +6,9 @@ export default defineConfig({
   // 生产打包优化：压缩脚本体积
   vite: () => ({
     build: {
+      // 关闭 modulepreload：扩展页在 ISOLATED world 中无法使用 preload，
+      // 会触发 "cross-world extension resource mismatch" 警告（无害但干扰排查）
+      modulePreload: false,
       // 生产环境不生成 sourcemap，减小产物体积
       sourcemap: false,
       // 使用 terser 做深度压缩，并在压缩阶段删除 console / debugger 语句
@@ -35,7 +38,10 @@ export default defineConfig({
     host_permissions: [
       'https://chat.deepseek.com/*',
       'https://www.doubao.com/*',
+      'https://wenxin.baidu.com/*',
+      'https://chat.baidu.com/*',
       'https://yiyan.baidu.com/*',
+      'https://www.qianwen.com/*',
       'https://tongyi.aliyun.com/*',
       // 新增 AI 网站时，需在此追加对应的 host 权限（executeScript 注入需要）
     ],

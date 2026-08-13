@@ -27,6 +27,10 @@ export async function autoFillAndSend(
 ) {
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+  // 判断 contenteditable 编辑器是否已包含目标文本（用于判断输入是否真正写入编辑器模型）
+  const editorContainsText = (el: HTMLElement, target: string): boolean =>
+    (el.textContent || '').includes(target);
+
   // 等待输入框出现（最多 60 次 x 500ms ≈ 30s）
   let input: HTMLElement | null = null;
   for (let i = 0; i < 60; i++) {
@@ -56,9 +60,12 @@ export async function autoFillAndSend(
     return;
   }
 
-  // 聚焦并设置值（兼容受控组件：通过原生 setter 触发）
+  // 聚焦并设置值
   input.focus();
+  await wait(200);
+
   if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
+    // 受控组件：通过原生 setter + input 事件触发框架状态更新
     const proto =
       input.tagName === 'TEXTAREA'
         ? HTMLTextAreaElement.prototype
@@ -66,45 +73,137 @@ export async function autoFillAndSend(
     const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
     if (setter) setter.call(input, text);
     else (input as HTMLInputElement).value = text;
+
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(
+      new CompositionEvent('compositionend', { bubbles: true, data: text }),
+    );
   } else if (input.isContentEditable) {
-    input.textContent = text;
+    // contenteditable。注意：千问/通义 用的是 Slate.js 富文本编辑器，
+    // execCommand('insertText') 只改 DOM 不更新 Slate 内部状态，发送按钮会一直 disabled。
+    // 必须派发 beforeinput/input（inputType: insertText）或 paste 事件走编辑器事件管线。
+    input.focus();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    // 方法1：beforeinput + input（Slate 及多数编辑器都监听这两个原生事件）
+    input.dispatchEvent(
+      new InputEvent('beforeinput', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText',
+        data: text,
+      }),
+    );
+    input.dispatchEvent(
+      new InputEvent('input', {
+        bubbles: true,
+        data: text,
+        inputType: 'insertText',
+      }),
+    );
+
+    // 方法2：paste 剪贴板事件（部分编辑器只通过 onPaste 读取内容）
+    if (!editorContainsText(input, text)) {
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', text);
+        input.dispatchEvent(
+          new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt,
+          }),
+        );
+      } catch {
+        /* 某些环境不支持 ClipboardEvent，忽略 */
+      }
+    }
+
+    // 方法3：execCommand 兜底（普通 contenteditable，非 Slate）
+    if (!editorContainsText(input, text)) {
+      try {
+        document.execCommand('insertText', false, text);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
-  // 触发多种事件，模拟真实输入（部分站点需要 compositionend 才激活发送按钮）
-  const events = [
-    new Event('input', { bubbles: true }),
-    new Event('change', { bubbles: true }),
-    new KeyboardEvent('keyup', { bubbles: true, key: 'a', code: 'KeyA' }),
-    new KeyboardEvent('keydown', { bubbles: true, key: 'a', code: 'KeyA' }),
-    new CompositionEvent('compositionend', { bubbles: true, data: text }),
-  ];
-  events.forEach((ev) => input!.dispatchEvent(ev));
+  // 等待框架处理输入状态
+  await wait(500);
 
-  // 等待发送按钮变为可用（有些网站需要时间处理输入状态）
-  await wait(2000);
+  // 判断按钮是否可用：原生 disabled / aria-disabled / CSS 禁用类
+  const isBtnDisabled = (btn: HTMLElement): boolean =>
+    (btn as HTMLButtonElement).disabled === true ||
+    btn.hasAttribute('disabled') ||
+    btn.getAttribute('aria-disabled') === 'true' ||
+    btn.classList.contains('disabled') ||
+    btn.classList.contains('is-disabled');
 
-  // 尝试点击发送按钮
+  // 点击发送按钮（对 span/div 补充 mousedown/mouseup，部分 SPA 监听而非 click）
+  const clickBtn = (btn: HTMLElement) => {
+    if (btn.tagName !== 'BUTTON' && btn.tagName !== 'INPUT') {
+      btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    }
+    btn.click();
+  };
+
+  // 发送按钮：两阶段点击。
+  // 阶段1）优先等待「平台专属」发送按钮（candidates[0]，最具体）渲染并可用后点击。
+  // 阶段2）专属按钮超时未就绪，才回退到通用候选。
+  // 避免误点通用按钮（如搜索框、工具栏按钮）导致「展开搜索窗口」而非发送。
   let sent = false;
   if (selectors.sendButton) {
     const candidates: string[] = selectors.sendButtonCandidates || [
       selectors.sendButton,
     ];
-    for (const sel of candidates) {
-      const btn = document.querySelector<HTMLElement>(sel);
-      // 不检查 offsetParent：部分按钮位于 shadow DOM 边界等场景下
-      // offsetParent 为 null，但 click 依然有效
-      if (btn && !(btn as HTMLButtonElement).disabled) {
-        btn.click();
-        sent = true;
-        console.log('✅ [multi-ai-ask] 点击发送按钮成功');
-        break;
+
+    // 阶段1：只等专属按钮（第一个候选项）
+    const specific = candidates[0];
+    if (specific) {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const btn = document.querySelector<HTMLElement>(specific);
+        if (btn && !isBtnDisabled(btn)) {
+          clickBtn(btn);
+          sent = true;
+          break;
+        }
+        await wait(200);
+      }
+    }
+
+    // 阶段2：专属按钮未就绪，等更久后回退到通用候选（跳过第 0 个，避免重复）
+    if (!sent && candidates.length > 1) {
+      for (let attempt = 0; attempt < 25; attempt++) {
+        let clicked = false;
+        for (let c = 1; c < candidates.length; c++) {
+          const sel = candidates[c];
+          if (!sel) continue;
+          const btn = document.querySelector<HTMLElement>(sel);
+          if (btn && !isBtnDisabled(btn)) {
+            clickBtn(btn);
+            clicked = true;
+            sent = true;
+            break;
+          }
+        }
+        if (clicked) break;
+        await wait(200);
       }
     }
   }
 
-  // 点击失败则模拟回车（更真实、更完整的事件对象）
+  // 点击失败则模拟回车
   if (!sent) {
     input.focus();
+    await wait(100);
     const keyboardEventInit: KeyboardEventInit = {
       key: 'Enter',
       code: 'Enter',
@@ -114,8 +213,8 @@ export async function autoFillAndSend(
       cancelable: true,
     };
     input.dispatchEvent(new KeyboardEvent('keydown', keyboardEventInit));
+    input.dispatchEvent(new KeyboardEvent('keypress', keyboardEventInit));
     input.dispatchEvent(new KeyboardEvent('keyup', keyboardEventInit));
-    console.log('🔄 [multi-ai-ask] 已尝试模拟回车发送');
   }
 
   // 发送已触发，启动「回答完成检测」：轮询回复块文本，稳定后通知后台弹提醒。
