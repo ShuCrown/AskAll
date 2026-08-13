@@ -13,13 +13,19 @@ export default defineContentScript({
       const target = event.target as Node;
       if (container && container.contains(target)) return;
 
-      const text = window.getSelection()?.toString().trim();
-      if (text && text.length > 0) {
+      const selection = window.getSelection();
+      const text = selection?.toString().trim();
+      if (text && text.length > 0 && selection && selection.rangeCount > 0) {
         if (container && lastText !== text) {
           hidePanel();
         }
         lastText = text;
-        showPanel(event.clientX, event.clientY, text);
+        // 以划词的包围矩形为锚点，让弹窗紧贴选中文字
+        const rect = selection.getRangeAt(0).getBoundingClientRect();
+        const anchorX =
+          rect.left + rect.width / 2 || (event.clientX ?? 0);
+        const anchorY = rect.bottom || (event.clientY ?? 0);
+        showPanel(anchorX, anchorY, text);
       } else {
         hidePanel();
       }
@@ -43,22 +49,21 @@ export default defineContentScript({
 
       const panelWidth = 280;
       const panelHeight = 380;
+      const gap = 16;
       const left = Math.max(8, Math.min(x, window.innerWidth - panelWidth - 8));
-      const top = Math.max(
-        8,
-        Math.min(y + 16, window.innerHeight - panelHeight - 8),
-      );
+      // 优先在鼠标下方展开，空间不足时自动移到上方
+      const spaceBelow = window.innerHeight - (y + gap) - 8;
+      const top =
+        spaceBelow >= panelHeight
+          ? y + gap
+          : Math.max(8, y - panelHeight - gap);
 
       root?.render(
-        <div
-          style={{
-            position: 'absolute',
-            left,
-            top,
-          }}
-        >
-          <FloatingPanel text={text} onClose={hidePanel} />
-        </div>,
+        <FloatingPanel
+          text={text}
+          onClose={hidePanel}
+          position={{ left, top }}
+        />,
       );
     }
 

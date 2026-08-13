@@ -1,21 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Settings } from 'lucide-react';
 import type { AiConfig } from '@/utils/aiConfig';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 const DEFAULT_PANEL_KEY = 'local:defaultFloatingPanel';
+const AUTO_SEND_KEY = 'local:autoSend';
 
 interface FloatingPanelProps {
   text: string;
   onClose: () => void;
+  position?: { left: number; top: number };
 }
 
 type PanelView = 'select' | 'result';
 
-export default function FloatingPanel({ text, onClose }: FloatingPanelProps) {
+export default function FloatingPanel({
+  text,
+  onClose,
+  position,
+}: FloatingPanelProps) {
   const [aiConfigs, setAiConfigs] = useState<AiConfig[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [view, setView] = useState<PanelView>('select');
   const [showAfterSend, setShowAfterSend] = useState(true);
+  const [autoSend, setAutoSend] = useState(false);
+  const [followUp, setFollowUp] = useState('');
   const sentRef = useRef(false);
 
   useEffect(() => {
@@ -39,7 +48,30 @@ export default function FloatingPanel({ text, onClose }: FloatingPanelProps) {
     storage.getItem('local:showResultAfterSend').then((v) => {
       if (typeof v === 'boolean') setShowAfterSend(v);
     });
+    storage.getItem(AUTO_SEND_KEY).then((v) => {
+      if (typeof v === 'boolean') setAutoSend(v);
+    });
   }, []);
+
+  // 自动发送：开启时直接向所有启用的 AI 发送，并展示第二个面板（结果面板）
+  useEffect(() => {
+    if (!autoSend || sentRef.current || aiConfigs.length === 0) return;
+    const enabled = aiConfigs.filter((ai) => ai.enabled && ai.url);
+    if (enabled.length === 0) return;
+    sentRef.current = true;
+    browser.runtime.sendMessage({
+      type: 'ASK_AI',
+      text,
+      aiIds: enabled.map((ai) => ai.id),
+    });
+    setView('result');
+    storage.setItem(DEFAULT_PANEL_KEY, 'result');
+  }, [autoSend, aiConfigs]);
+
+  const toggleAutoSend = async (checked: boolean) => {
+    await storage.setItem(AUTO_SEND_KEY, checked);
+    setAutoSend(checked);
+  };
 
   const toggleAi = (id: string) => {
     setSelectedIds((prev) => {
@@ -78,6 +110,18 @@ export default function FloatingPanel({ text, onClose }: FloatingPanelProps) {
     browser.runtime.sendMessage({ type: 'OPEN_SETTINGS' });
   };
 
+  // 在结果面板手动输入新的问题，直接向已打开的聊天窗口发送，不新建标签页/弹窗
+  const handleFollowUpSend = () => {
+    const q = followUp.trim();
+    if (!q || selectedList.length === 0) return;
+    browser.runtime.sendMessage({
+      type: 'ASK_AI_FOLLOWUP',
+      text: q,
+      aiIds: selectedList.map((ai) => ai.id),
+    });
+    setFollowUp('');
+  };
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -101,7 +145,8 @@ export default function FloatingPanel({ text, onClose }: FloatingPanelProps) {
 
   return (
     <div style={styles.overlay} onClick={(e) => e.stopPropagation()}>
-      <div style={styles.card}>
+      <style>{panelCss}</style>
+      <div style={{ ...styles.card, ...(position ? { left: position.left, top: position.top } : {}) }}>
         <div style={styles.header}>
           <div style={styles.title}>
             <span style={styles.logo}>齐</span>
@@ -114,7 +159,7 @@ export default function FloatingPanel({ text, onClose }: FloatingPanelProps) {
             aria-label="设置"
             title="设置"
           >
-            ⚙️
+            <Settings style={{ width: 16, height: 16 }} />
           </button>
         </div>
 
@@ -124,30 +169,62 @@ export default function FloatingPanel({ text, onClose }: FloatingPanelProps) {
               <span style={styles.countText}>
                 已选择 {selectedList.length}/{enabledList.length}
               </span>
-            </div>
-            <div style={styles.list}>
-              {enabledList.map((ai) => (
-                <label
-                  key={ai.id}
+              <label style={styles.autoSendLabel} title="开启后划词自动发送并直接展示结果面板">
+                <span style={styles.autoSendText}>自动发送</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={autoSend}
+                  onClick={() => toggleAutoSend(!autoSend)}
                   style={{
-                    ...styles.item,
-                    background: selectedIds.has(ai.id)
-                      ? '#eff6ff'
-                      : 'transparent',
+                    ...styles.switchTrack,
+                    ...(autoSend ? styles.switchTrackOn : {}),
                   }}
                 >
-                  <span style={styles.aiName}>
-                    <span style={styles.aiIcon}>{aiIcon(ai.name)}</span>
-                    {ai.name}
-                  </span>
-                  <input
-                    type="checkbox"
-                    style={styles.checkbox}
-                    checked={selectedIds.has(ai.id)}
-                    onChange={() => toggleAi(ai.id)}
+                  <span
+                    style={{
+                      ...styles.switchThumb,
+                      ...(autoSend ? styles.switchThumbOn : {}),
+                    }}
                   />
-                </label>
-              ))}
+                </button>
+              </label>
+            </div>
+            <div style={styles.list}>
+              {enabledList.map((ai) => {
+                const selected = selectedIds.has(ai.id);
+                return (
+                  <label
+                    key={ai.id}
+                    className="askall-item"
+                    style={{
+                      ...styles.item,
+                      ...(selected ? styles.itemSelected : {}),
+                    }}
+                  >
+                    <span style={styles.aiName}>
+                      <span
+                        style={{
+                          ...styles.aiIcon,
+                          ...(selected ? styles.aiIconSelected : {}),
+                        }}
+                      >
+                        {aiIcon(ai.name)}
+                      </span>
+                      {ai.name}
+                    </span>
+                    <span
+                      className="askall-checkbox"
+                      style={{
+                        ...styles.checkbox,
+                        ...(selected ? styles.checkboxSelected : {}),
+                      }}
+                    >
+                      {selected && <span style={styles.checkmark}>✓</span>}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
             <button
               type="button"
@@ -164,6 +241,25 @@ export default function FloatingPanel({ text, onClose }: FloatingPanelProps) {
           </>
         ) : (
           <>
+            <div style={styles.composeBox}>
+              <input
+                value={followUp}
+                onChange={(e) => setFollowUp(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleFollowUpSend();
+                }}
+                placeholder="输入新的问题，向已打开的聊天窗口发送…"
+                style={styles.composeInput}
+              />
+              <button
+                type="button"
+                style={styles.composeBtn}
+                onClick={handleFollowUpSend}
+                disabled={!followUp.trim()}
+              >
+                发送
+              </button>
+            </div>
             <div style={styles.questionBox}>
               <div style={styles.questionLabel}>我的问题</div>
               <div style={styles.questionText}>{text}</div>
@@ -224,6 +320,12 @@ function aiIcon(name: string) {
   return '🤖 ';
 }
 
+const panelCss = `
+  .askall-item { cursor: pointer; }
+  .askall-item:hover { background: hsl(220 14.3% 95.9%); }
+  .askall-item:hover .askall-checkbox { border-color: hsl(221.2 83.2% 53.3%); }
+`;
+
 const styles: Record<string, React.CSSProperties> = {
   overlay: {
     position: 'fixed',
@@ -232,16 +334,18 @@ const styles: Record<string, React.CSSProperties> = {
     pointerEvents: 'none',
   },
   card: {
-    position: 'absolute',
+    position: 'fixed',
+    zIndex: 2147483647,
     width: 280,
-    background: '#fff',
-    borderRadius: 12,
-    boxShadow: '0 8px 30px rgba(0,0,0,0.16)',
+    background: 'hsl(0 0% 100%)',
+    borderRadius: 8,
+    border: '1px solid hsl(220 13% 91%)',
+    boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05), 0 10px 20px -2px rgba(0,0,0,0.08)',
     padding: 12,
     fontFamily:
       "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
     fontSize: 14,
-    color: '#1f2937',
+    color: 'hsl(224 71.4% 4.1%)',
     pointerEvents: 'auto',
     display: 'flex',
     flexDirection: 'column',
@@ -263,8 +367,8 @@ const styles: Record<string, React.CSSProperties> = {
     width: 24,
     height: 24,
     borderRadius: 6,
-    background: '#2563eb',
-    color: '#fff',
+    background: 'hsl(221.2 83.2% 53.3%)',
+    color: 'hsl(210 40% 98%)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -279,6 +383,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 4,
     borderRadius: 6,
     lineHeight: 1,
+    color: 'hsl(220 8.9% 46.1%)',
   },
   countRow: {
     display: 'flex',
@@ -286,8 +391,47 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
   },
   countText: {
-    fontSize: 13,
-    color: '#374151',
+    fontSize: 12,
+    color: 'hsl(220 8.9% 46.1%)',
+  },
+  autoSendLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    cursor: 'pointer',
+  },
+  autoSendText: {
+    fontSize: 12,
+    color: 'hsl(220 8.9% 46.1%)',
+  },
+  switchTrack: {
+    width: 30,
+    height: 18,
+    borderRadius: 999,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(220 14.3% 95.9%)',
+    padding: 0,
+    position: 'relative',
+    cursor: 'pointer',
+    transition: 'background 0.15s',
+  },
+  switchTrackOn: {
+    background: 'hsl(221.2 83.2% 53.3%)',
+    borderColor: 'hsl(221.2 83.2% 53.3%)',
+  },
+  switchThumb: {
+    position: 'absolute',
+    top: 1,
+    left: 1,
+    width: 14,
+    height: 14,
+    borderRadius: '50%',
+    background: '#fff',
+    boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+    transition: 'left 0.15s',
+  },
+  switchThumbOn: {
+    left: 13,
   },
   list: {
     display: 'flex',
@@ -302,66 +446,120 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     padding: '8px 6px',
     borderRadius: 8,
-    cursor: 'pointer',
     transition: 'background 0.15s',
+  },
+  itemSelected: {
+    background: 'hsl(221.2 83.2% 53.3% / 0.08)',
   },
   aiName: {
     fontSize: 14,
     display: 'flex',
     alignItems: 'center',
     gap: 6,
+    color: 'hsl(224 71.4% 4.1%)',
   },
   aiIcon: {
     fontSize: 13,
     lineHeight: 1,
+    filter: 'grayscale(0.4)',
+    opacity: 0.6,
+  },
+  aiIconSelected: {
+    filter: 'none',
+    opacity: 1,
   },
   checkbox: {
-    width: 18,
-    height: 18,
-    accentColor: '#2563eb',
-    cursor: 'pointer',
+    width: 16,
+    height: 16,
+    borderRadius: 4,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(0 0% 100%)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  checkboxSelected: {
+    borderColor: 'hsl(221.2 83.2% 53.3%)',
+    background: 'hsl(221.2 83.2% 53.3%)',
+  },
+  checkmark: {
+    fontSize: 10,
+    lineHeight: 1,
+    color: 'hsl(210 40% 98%)',
+    fontWeight: 700,
   },
   sendBtn: {
     width: '100%',
-    padding: '10px 0',
+    padding: '9px 0',
     borderRadius: 8,
     border: 'none',
-    background: '#2563eb',
-    color: '#fff',
+    background: 'hsl(221.2 83.2% 53.3%)',
+    color: 'hsl(210 40% 98%)',
     fontSize: 14,
     fontWeight: 500,
     cursor: 'pointer',
+    transition: 'background 0.15s',
   },
   hint: {
     textAlign: 'center',
     fontSize: 12,
-    color: '#9ca3af',
+    color: 'hsl(220 8.9% 46.1%)',
+  },
+  composeBox: {
+    display: 'flex',
+    gap: 8,
+  },
+  composeInput: {
+    flex: 1,
+    minWidth: 0,
+    height: 34,
+    padding: '0 10px',
+    borderRadius: 8,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(0 0% 100%)',
+    fontSize: 13,
+    color: 'hsl(224 71.4% 4.1%)',
+    outline: 'none',
+  },
+  composeBtn: {
+    height: 34,
+    padding: '0 14px',
+    borderRadius: 8,
+    border: 'none',
+    background: 'hsl(221.2 83.2% 53.3%)',
+    color: 'hsl(210 40% 98%)',
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: 'pointer',
+    flexShrink: 0,
   },
   questionBox: {
-    background: '#eff6ff',
+    background: 'hsl(221.2 83.2% 53.3% / 0.08)',
     borderRadius: 8,
     padding: 10,
   },
   questionLabel: {
     fontSize: 12,
-    color: '#2563eb',
+    color: 'hsl(221.2 83.2% 53.3%)',
     marginBottom: 4,
   },
   questionText: {
     fontSize: 14,
     lineHeight: 1.5,
     wordBreak: 'break-word',
+    color: 'hsl(224 71.4% 4.1%)',
   },
   resultHeader: {
     display: 'flex',
     gap: 12,
-    borderBottom: '1px solid #e5e7eb',
+    borderBottom: '1px solid hsl(220 13% 91%)',
     paddingBottom: 6,
   },
   resultTitle: {
     fontSize: 13,
     fontWeight: 600,
-    color: '#2563eb',
+    color: 'hsl(221.2 83.2% 53.3%)',
   },
   resultList: {
     display: 'flex',
@@ -374,10 +572,11 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'block',
     padding: 10,
     borderRadius: 8,
-    border: '1px solid #e5e7eb',
+    border: '1px solid hsl(220 13% 91%)',
     textDecoration: 'none',
     color: 'inherit',
     cursor: 'pointer',
+    transition: 'background 0.15s',
   },
   resultName: {
     fontWeight: 600,
@@ -386,10 +585,11 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     gap: 6,
+    color: 'hsl(224 71.4% 4.1%)',
   },
   resultStatus: {
     fontSize: 12,
-    color: '#6b7280',
+    color: 'hsl(220 8.9% 46.1%)',
   },
   resultActions: {
     display: 'flex',
@@ -399,9 +599,9 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
     padding: '9px 0',
     borderRadius: 8,
-    border: '1px solid #d1d5db',
-    background: '#fff',
-    color: '#374151',
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(0 0% 100%)',
+    color: 'hsl(224 71.4% 4.1%)',
     fontSize: 14,
     cursor: 'pointer',
   },

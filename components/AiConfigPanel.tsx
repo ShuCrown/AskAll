@@ -37,6 +37,7 @@ export default function AiConfigPanel({
   const [showResultAfterSend, setShowResultAfterSend] = useState(true);
   const [selectAllByDefault, setSelectAllByDefault] = useState(true);
   const [defaultPanel, setDefaultPanel] = useState<'select' | 'result'>('select');
+  const [autoSend, setAutoSend] = useState(false);
 
   useEffect(() => {
     storage.getItem(AI_CONFIGS_KEY).then((data) => {
@@ -53,6 +54,9 @@ export default function AiConfigPanel({
     });
     storage.getItem('local:defaultFloatingPanel').then((v) => {
       if (v === 'select' || v === 'result') setDefaultPanel(v);
+    });
+    storage.getItem('local:autoSend').then((v) => {
+      if (typeof v === 'boolean') setAutoSend(v);
     });
   }, []);
 
@@ -99,6 +103,11 @@ export default function AiConfigPanel({
     await storage.setItem('local:selectAllByDefault', checked);
   };
 
+  const toggleAutoSend = async (checked: boolean) => {
+    setAutoSend(checked);
+    await storage.setItem('local:autoSend', checked);
+  };
+
   const changeDefaultPanel = async (panel: 'select' | 'result') => {
     setDefaultPanel(panel);
     await storage.setItem('local:defaultFloatingPanel', panel);
@@ -133,6 +142,11 @@ export default function AiConfigPanel({
         <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
           <Label className="text-sm text-muted-foreground">发送后显示结果面板</Label>
           <Switch checked={showResultAfterSend} onCheckedChange={toggleShowResult} />
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+          <Label className="text-sm text-muted-foreground">划词自动发送</Label>
+          <Switch checked={autoSend} onCheckedChange={toggleAutoSend} />
         </div>
 
         <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
