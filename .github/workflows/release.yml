@@ -95,9 +95,15 @@ jobs:
             exit 1
           fi
           zip_file=$(ls .output/*.zip | head -n1)
+          target=".output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip"
           echo "Found zip: $zip_file"
-          mv "$zip_file" ".output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip"
-          echo "Renamed to: .output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip"
+          # 仅当文件名与目标不一致时才重命名，避免 mv 同名文件报错
+          if [ "$zip_file" != "$target" ]; then
+            mv "$zip_file" "$target"
+            echo "Renamed to: $target"
+          else
+            echo "Zip already named correctly: $target"
+          fi
           ls -la .output/
 
       - name: Upload artifact
