@@ -1,18 +1,8 @@
-name: Release Extension
+name: Build & Release Extension
 
-# 手动触发：在 Actions 页面点击 "Run workflow"，可选择包 Chrome / Firefox
+# 手动触发：在 Actions 页面点击 "Run workflow" 打包 Chrome / Firefox
 on:
   workflow_dispatch:
-    inputs:
-      platforms:
-        description: '要打包并上传的平台（逗号分隔）'
-        required: true
-        default: 'chrome,firefox'
-      dry_run:
-        description: '仅打包不上传（dry run），用于验证'
-        required: false
-        default: 'false'
-        type: boolean
 
 permissions:
   contents: write
@@ -22,7 +12,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # 版本配置来源
   VERSION_FILE: version.json
 
 jobs:
@@ -52,10 +41,10 @@ jobs:
           echo "TAG=v$version" >> "$GITHUB_OUTPUT"
 
   # ============================================================
-  # 打包 Chrome 与 Firefox（WXT + web-ext）
+  # 打包 Chrome 与 Firefox（不依赖任何插件平台账号）
   # ============================================================
-  build-crfx:
-    name: Build & package Chrome/Firefox
+  build:
+    name: Build & package ${{ matrix.browser }}
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
@@ -84,7 +73,6 @@ jobs:
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
           echo "$VERSION" > .version
 
-      # 用 WXT 打包 zip（Firefox 上传到 AMO 后由 Mozilla 完成签名）
       - name: Build (${{ matrix.browser }})
         run: pnpm wxt zip -b ${{ matrix.browser }} --mode production
 
@@ -96,90 +84,11 @@ jobs:
           if-no-files-found: error
 
   # ============================================================
-  # 打包 Safari（需 macOS + Xcode + 已提交的 Xcode 工程）
-  #
-  # 注意：Safari 扩展必须由原生 App（.app）承载。
-  # 需要先在本地用 Xcode 打开一次：
-  #   File > New > Project > App (macOS) -> 添加 "Web Extension" target，
-  #   并把 /dist 目录指向构建产物，然后提交该 Xcode 工程到仓库。
-  # 若仓库中没有 safari/AskAll.xcodeproj，本 job 会跳过。
-  # ============================================================
-  build-safari:
-    name: Build Safari extension
-    needs: prepare
-    runs-on: macos-latest
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Sync version
-        run: |
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
-          echo "$VERSION" > .version
-
-      - name: Check Xcode project exists
-        id: check
-        run: |
-          if [ -d "safari/AskAll.xcodeproj" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build WXT for Safari
-        if: steps.check.outputs.present == 'true'
-        run: pnpm wxt build --mode production
-
-      - name: Build Safari app with xcodebuild
-        if: steps.check.outputs.present == 'true'
-        run: |
-          cd safari
-          xcodebuild \
-            -project AskAll.xcodeproj \
-            -scheme "AskAll (macOS)" \
-            -configuration Release \
-            -derivedDataPath build \
-            PRODUCT_BUNDLE_IDENTIFIER="com.example.askall" \
-            MARKETING_VERSION="$VERSION" \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=NO \
-            build
-
-      - name: Package Safari build
-        if: steps.check.outputs.present == 'true'
-        run: |
-          cd safari
-          APP=$(find build/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "../askall-safari-$VERSION.zip"
-
-      - name: Upload artifact
-        if: steps.check.outputs.present == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: extension-safari-${{ env.VERSION }}
-          path: askall-safari-${{ env.VERSION }}.zip
-          if-no-files-found: error
-
-  # ============================================================
-  # 创建 GitHub Release（含更新说明）
+  # 创建 GitHub Release，作为插件自检 / 下载更新的来源
   # ============================================================
   release:
     name: Create GitHub Release
-    needs: [prepare, build-crfx, build-safari]
-    if: ${{ always() && needs.prepare.result == 'success' && (needs.build-crfx.result == 'success') && (needs.build-safari.result == 'success' || needs.build-safari.result == 'skipped') }}
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -205,65 +114,3 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: artifacts/**/*.zip
           draft: true
-
-  # ============================================================
-  # 上传到各平台（可利用 dry_run 跳过）
-  # ============================================================
-  upload:
-    name: Upload to stores
-    needs: [prepare, build-crfx, build-safari]
-    if: ${{ !inputs.dry_run }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      # ---- Chrome Web Store ----
-      - name: Upload to Chrome Web Store
-        if: ${{ contains(inputs.platforms, 'chrome') }}
-        uses: ewd3r/chrome-webstore-upload-action@v1
-        with:
-          extension_id: ${{ secrets.CHROME_EXTENSION_ID }}
-          zip_path: ${{ github.workspace }}/artifacts/extension-chrome-*
-          client_id: ${{ secrets.CHROME_CLIENT_ID }}
-          client_secret: ${{ secrets.CHROME_CLIENT_SECRET }}
-          refresh_token: ${{ secrets.CHROME_REFRESH_TOKEN }}
-          publish: true
-
-      # ---- Firefox / AMO ----
-      - name: Upload to Firefox Add-ons (AMO)
-        if: ${{ contains(inputs.platforms, 'firefox') }}
-        uses: mozilla-actions/firefox-addon@v1
-        with:
-          addon-uuid: ${{ secrets.AMO_EXTENSION_ID }}
-          addon-version: ${{ needs.prepare.outputs.version }}
-          addon-file: ${{ github.workspace }}/artifacts/extension-firefox-*
-          api-key: ${{ secrets.AMO_API_KEY }}
-          api-secret: ${{ secrets.AMO_API_SECRET }}
-          channel: unlisted
-
-      # ---- Safari / App Store Connect ----
-      - name: Import Apple signing certificate
-        if: ${{ contains(inputs.platforms, 'safari') }}
-        uses: apple-actions/import-codesign-certs@v1
-        with:
-          p12-file-base64: ${{ secrets.APPLE_CERT_BASE64 }}
-          p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
-          keychain-password: ${{ secrets.KEYCHAIN_PASSWORD }}
-
-      - name: Notarize & upload Safari
-        if: ${{ contains(inputs.platforms, 'safari') }}
-        run: |
-          SAFARI_ZIP=$(ls artifacts/extension-safari-*/*.zip)
-          xcrun notarytool submit "$SAFARI_ZIP" \
-            --apple-id "${{ secrets.APPLE_ID }}" \
-            --password "${{ secrets.APPLE_APP_PASSWORD }}" \
-            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
-            --wait
-          xcrun altool --upload-app \
-            --file "$SAFARI_ZIP" \
-            --type macos \
-            --apple-id "${{ secrets.APPLE_ID }}" \
-            --password "${{ secrets.APPLE_APP_PASSWORD }}" \
-            --team-id "${{ secrets.APPLE_TEAM_ID }}"
