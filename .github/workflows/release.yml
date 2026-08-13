@@ -1,13 +1,13 @@
 name: Release Extension
 
-# 手动触发：在 Actions 页面点击 "Run workflow"，可选择包 Chrome / Firefox / Safari
+# 手动触发：在 Actions 页面点击 "Run workflow"，可选择包 Chrome / Firefox
 on:
   workflow_dispatch:
     inputs:
       platforms:
         description: '要打包并上传的平台（逗号分隔）'
         required: true
-        default: 'chrome,firefox,safari'
+        default: 'chrome,firefox'
       dry_run:
         description: '仅打包不上传（dry run），用于验证'
         required: false
