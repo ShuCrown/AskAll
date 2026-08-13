@@ -1,0 +1,116 @@
+name: Build & Release Extension
+
+# 手动触发：在 Actions 页面点击 "Run workflow" 打包 Chrome / Firefox
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION_FILE: version.json
+
+jobs:
+  # ============================================================
+  # 提取版本与更新内容
+  # ============================================================
+  prepare:
+    name: Read version & notes
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.VERSION }}
+      notes_zh: ${{ steps.read.outputs.NOTES_ZH }}
+      notes_en: ${{ steps.read.outputs.NOTES_EN }}
+      tag: ${{ steps.read.outputs.TAG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version.json
+        id: read
+        run: |
+          version=$(jq -r '.version' "$VERSION_FILE")
+          notes_zh=$(jq -r '.release_notes["zh-CN"]' "$VERSION_FILE")
+          notes_en=$(jq -r '.release_notes.en' "$VERSION_FILE")
+          echo "VERSION=$version" >> "$GITHUB_OUTPUT"
+          echo "NOTES_ZH=$notes_zh" >> "$GITHUB_OUTPUT"
+          echo "NOTES_EN=$notes_en" >> "$GITHUB_OUTPUT"
+          echo "TAG=v$version" >> "$GITHUB_OUTPUT"
+
+  # ============================================================
+  # 打包 Chrome 与 Firefox（不依赖任何插件平台账号）
+  # ============================================================
+  build:
+    name: Build & package ${{ matrix.browser }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        browser: [chrome, firefox]
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 用 version.json 覆盖 package.json / WXT 的版本号
+      - name: Sync version
+        run: |
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          echo "$VERSION" > .version
+
+      - name: Build (${{ matrix.browser }})
+        run: pnpm wxt zip -b ${{ matrix.browser }} --mode production
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ matrix.browser }}-${{ env.VERSION }}
+          path: .output/*.zip
+          if-no-files-found: error
+
+  # ============================================================
+  # 创建 GitHub Release，作为插件自检 / 下载更新的来源
+  # ============================================================
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Write release notes
+        run: |
+          {
+            echo "## zh-CN"
+            echo "${{ needs.prepare.outputs.notes_zh }}"
+            echo ""
+            echo "## English"
+            echo "${{ needs.prepare.outputs.notes_en }}"
+          } > RELEASE_NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: "v${{ env.VERSION }}"
+          body_path: RELEASE_NOTES.md
+          files: artifacts/**/*.zip
+          draft: true
