@@ -12,6 +12,15 @@ interface Conversation {
   turns: HistoryItem[];
 }
 
+/** 时间戳 → 中文格式：2026年8月14日 10时57分25秒 */
+function formatDateTime(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${pad(
+    d.getHours(),
+  )}时${pad(d.getMinutes())}分${pad(d.getSeconds())}秒`;
+}
+
 export default function HistoryPanel() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -19,6 +28,13 @@ export default function HistoryPanel() {
   useEffect(() => {
     getHistory().then(setHistory);
   }, []);
+
+  /** 打开问答链接：优先切换到该 AI 已打开的会话标签页，找不到才打开链接地址 */
+  const openLink = (url: string) => {
+    browser.runtime.sendMessage({ type: 'OPEN_AI_TAB', url }).catch(() => {
+      window.open(url, '_blank', 'noreferrer');
+    });
+  };
 
   // 按 conversationId 分组：同一会话的多轮追问归为一组；无 conversationId 的旧数据各自成组
   const conversations = useMemo<Conversation[]>(() => {
@@ -89,8 +105,7 @@ export default function HistoryPanel() {
                   </p>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {new Date(conv.root.timestamp).toLocaleString()} ·{' '}
-                  {conv.root.aiNames.join(', ')}
+                  {formatDateTime(conv.root.timestamp)}
                   {multiTurn && ` · ${conv.turns.length} 轮`}
                 </p>
               </button>
@@ -101,20 +116,19 @@ export default function HistoryPanel() {
                     <div key={turn.id}>
                       <p className="text-sm leading-snug">{turn.question}</p>
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
-                        {new Date(turn.timestamp).toLocaleString()}
+                        {formatDateTime(turn.timestamp)}
                       </p>
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         {turn.aiUrls?.map((link, i) => (
-                          <a
+                          <button
                             key={`${link.name}-${i}`}
-                            href={link.url}
-                            target="_blank"
-                            rel="noreferrer"
+                            type="button"
+                            onClick={() => openLink(link.url)}
                             className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-0.5 text-xs text-secondary-foreground transition-colors hover:bg-accent"
                           >
                             <ExternalLink className="h-3 w-3" />
                             {link.name}
-                          </a>
+                          </button>
                         ))}
                       </div>
                     </div>
@@ -125,16 +139,15 @@ export default function HistoryPanel() {
               {!multiTurn && (
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {conv.root.aiUrls?.map((link, i) => (
-                    <a
+                    <button
                       key={`${link.name}-${i}`}
-                      href={link.url}
-                      target="_blank"
-                      rel="noreferrer"
+                      type="button"
+                      onClick={() => openLink(link.url)}
                       className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-1 text-xs text-secondary-foreground transition-colors hover:bg-accent"
                     >
                       <ExternalLink className="h-3 w-3" />
                       {link.name}
-                    </a>
+                    </button>
                   ))}
                 </div>
               )}
