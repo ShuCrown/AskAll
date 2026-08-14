@@ -40,12 +40,17 @@ jobs:
         id: read
         run: |
           version=$(jq -r '.version' "$VERSION_FILE")
-          notes_zh=$(jq -r '.release_notes["zh-CN"]' "$VERSION_FILE")
-          notes_en=$(jq -r '.release_notes.en' "$VERSION_FILE")
           echo "VERSION=$version" >> "$GITHUB_OUTPUT"
-          echo "NOTES_ZH=$notes_zh" >> "$GITHUB_OUTPUT"
-          echo "NOTES_EN=$notes_en" >> "$GITHUB_OUTPUT"
           echo "TAG=v$version" >> "$GITHUB_OUTPUT"
+          # 多行内容必须使用 heredoc 分隔符语法，否则 GITHUB_OUTPUT 报 "Invalid format"
+          {
+            echo "NOTES_ZH<<ASKALL_EOF"
+            jq -r '.release_notes["zh-CN"]' "$VERSION_FILE"
+            echo "ASKALL_EOF"
+            echo "NOTES_EN<<ASKALL_EOF"
+            jq -r '.release_notes.en' "$VERSION_FILE"
+            echo "ASKALL_EOF"
+          } >> "$GITHUB_OUTPUT"
 
   # ============================================================
   # 打包 Chrome 与 Firefox（不依赖任何插件平台账号）
@@ -129,13 +134,14 @@ jobs:
 
       - name: Write release notes
         run: |
-          {
-            echo "## zh-CN"
-            echo "${{ needs.prepare.outputs.notes_zh }}"
-            echo ""
-            echo "## English"
-            echo "${{ needs.prepare.outputs.notes_en }}"
-          } > RELEASE_NOTES.md
+          # 多行内容用带引号的 heredoc 写入，避免变量展开与格式问题
+          cat > RELEASE_NOTES.md <<'ASKALL_NOTES_EOF_7f3a'
+          ## zh-CN
+          ${{ needs.prepare.outputs.notes_zh }}
+
+          ## English
+          ${{ needs.prepare.outputs.notes_en }}
+          ASKALL_NOTES_EOF_7f3a
 
       - uses: softprops/action-gh-release@v2
         with:
