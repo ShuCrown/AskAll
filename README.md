@@ -33,7 +33,7 @@ pnpm zip          # 打包 zip
 pnpm zip:firefox
 ```
 
-发布版本号与更新说明由 `version.json` 统一维护，推送至 `main` 分支（或手动触发）即可由 GitHub Actions 自动打包并创建 Release。
+发布版本号与更新说明由 `version.json` 统一维护。推送至 `main` 分支（任意文件改动）即自动构建打包并创建 **draft 草稿 Release**（不直接发布）；确认无误后，在 GitHub Releases 页面手动发布即可正式上线。也可在 Actions 页面手动触发构建。
 
 ## 项目结构
 

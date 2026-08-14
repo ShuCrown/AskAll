@@ -1,14 +1,13 @@
 name: Build & Release Extension
 
 # 触发方式：
-#   1. push 到 main 分支且 version.json 有改动时，自动打包 Chrome / Firefox
-#   2. 手动触发：在 Actions 页面点击 "Run workflow" 打包 Chrome / Firefox
+#   1. push 到 main 分支（任意文件改动）时，自动构建并创建 draft Release
+#   2. 手动触发：在 Actions 页面点击 "Run workflow" 重新构建
+# 说明：创建的 Release 一律为草稿（draft），确认无误后需在 GitHub 页面手动发布
 on:
   push:
     branches:
       - main
-    paths:
-      - version.json
   workflow_dispatch:
 
 permissions:
@@ -119,14 +118,15 @@ jobs:
           if-no-files-found: error
 
   # ============================================================
-  # 创建 GitHub Release，作为插件自检 / 下载更新的来源
+  # 创建 GitHub Release（始终为草稿 draft，需手动发布）
   # ============================================================
   release:
-    name: Create GitHub Release
+    name: Create draft GitHub Release
     needs: [prepare, build]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -143,10 +143,28 @@ jobs:
           ${{ needs.prepare.outputs.notes_en }}
           ASKALL_NOTES_EOF_7f3a
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: "v${{ env.VERSION }}"
-          body_path: RELEASE_NOTES.md
-          files: artifacts/**/*.zip
-          draft: true
+      # 每次构建都生成/更新 draft 草稿；已正式发布的 release 不做改动
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+            if [ "$is_draft" = "true" ]; then
+              echo "Draft release $TAG 已存在，更新附件与说明…"
+              gh release upload "$TAG" artifacts/**/*.zip --clobber
+              gh release edit "$TAG" \
+                --title "v$VERSION" \
+                --notes-file RELEASE_NOTES.md \
+                --draft
+            else
+              echo "Release $TAG 已正式发布，跳过自动更新"
+            fi
+          else
+            echo "创建新 draft release $TAG …"
+            gh release create "$TAG" \
+              --title "v$VERSION" \
+              --notes-file RELEASE_NOTES.md \
+              --draft \
+              artifacts/**/*.zip
+          fi
