@@ -55,9 +55,9 @@ export default defineConfig({
         matches: ['<all_urls>'],
       },
     ],
-    options_ui: {
-      page: 'options.html',
-      open_in_tab: false,
-    },
+  },
+  // 设置页：在新标签页全屏打开（WXT 会用该字段覆盖 manifest 中的 open_in_tab）
+  options: {
+    openInTab: true,
   },
 });

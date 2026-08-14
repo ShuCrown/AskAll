@@ -1,3 +1,69 @@
-# WXT + React
+# AskAll 齐问
 
-This template should help get you started developing with React in WXT.
+划词同时向多个 AI 提问的浏览器扩展。选中网页任意文字，一键向 DeepSeek、豆包、文心一言、通义千问等多个 AI 同时提问，自动填充发送、自动记录历史，无需在多个标签页间手动切换。
+
+基于 [WXT](https://wxt.dev) + React 构建，支持 Chrome / Firefox（MV3）。
+
+## 功能特性
+
+- **划词提问**：选中网页文字后，通过右键菜单或快捷键（默认 `Alt+Q`）唤起浮动面板
+- **多 AI 同时提问**：内置 DeepSeek、豆包、文心一言、通义千问，可自由勾选，也支持自定义 AI 平台
+- **自动填充发送**：在 AI 页面自动填入问题并发送，无需手动操作（可关闭，改为手动发送）
+- **浮动面板**：
+  - AI 多选、一键提问、追加追问（延续同一会话）
+  - 面板可固定 / 最小化为悬浮球、可拖拽移动与八向缩放
+  - 发送状态实时展示（打开中 / 发送中 / 已完成）
+- **历史记录**：自动记录每次提问与回答链接，按会话分组展示，支持多轮追问回溯；点击链接可跳转回对应会话
+- **回答完成通知**：AI 回答完成后弹系统通知提醒（可开关）
+- **打开方式可选**：标签页或独立窗口（弹窗模式）
+- **可配置快捷键**：默认 `Alt+Q`，可在设置中修改
+
+## 安装使用
+
+1. `pnpm install`
+2. `pnpm dev` 启动开发模式（自动打开浏览器加载扩展）
+3. 选中网页文字 → 右键菜单「AskAll 齐问：打开提问面板」，或按 `Alt+Q` 提问
+
+### 打包发布
+
+```bash
+pnpm build        # 构建 Chrome
+pnpm build:firefox
+pnpm zip          # 打包 zip
+pnpm zip:firefox
+```
+
+发布版本号与更新说明由 `version.json` 统一维护，推送至 `main` 分支（或手动触发）即可由 GitHub Actions 自动打包并创建 Release。
+
+## 项目结构
+
+```
+entrypoints/
+  background.ts        # 后台服务：任务管理、自动发送、会话 URL 跟踪、通知
+  content.tsx          # 内容脚本：划词监听、快捷键、浮动面板挂载
+  popup/               # 工具栏弹窗
+  options/             # 设置页（AI 配置 / 历史记录）
+components/
+  FloatingPanel.tsx    # 划词浮动面板（提问 / 结果 / 追问 / 固定缩放）
+  AiConfigPanel.tsx    # AI 配置面板
+  HistoryPanel.tsx     # 历史记录面板
+utils/
+  aiConfig.ts          # AI 平台配置与默认选择器
+  autoSend.ts          # 自动填充发送（MAIN world 注入 + 选择器兜底）
+  history.ts           # 历史记录存储
+  task.ts              # 任务 / 会话类型定义
+public/
+  icon/                # 扩展图标（16/32/48/96/128）
+  ai/                  # 各 AI 平台品牌图标
+```
+
+## 技术要点
+
+- **自动发送**：通过 `chrome.scripting` 在 MAIN world 注入脚本，结合多级选择器候选与语义兜底，适配各 AI 站点频繁变化的 DOM；内置重试机制与超时保护
+- **会话跟踪**：后台记录「AI 标签页 → 历史条目」映射，监听同域 URL 跳转并在稳定后回写真实会话地址，保证历史链接可回跳
+- **并发发送**：各 AI 标签页互不等待，实现真正并行提问
+- **注入安全**：内容脚本中引用的 public 资源（图标 / AI 品牌图）均在 `web_accessible_resources` 白名单中声明
+
+## 版本历史
+
+- **v1.0.0**（2026-08-14）：正式发布。划词多 AI 提问、自动填充发送、历史记录与会话回跳、回答完成通知；优化历史日期中文格式、设置页全屏布局；修复 logo 加载被拦截、历史链接不匹配会话等问题。详见 `version.json`。

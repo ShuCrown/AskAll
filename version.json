@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "release_notes": {
-    "zh-CN": "初始发布：支持划词向多个 AI 平台提问，自动发送并记录历史。",
-    "en": "Initial release: select text and ask multiple AI platforms at once, with auto-send and history."
+    "zh-CN": "AskAll 齐问 1.0.0 正式发布：划词同时向多个 AI 提问，自动发送并记录历史。\n\n新增功能：\n- 划词提问：选中网页文字，通过右键菜单或快捷键（默认 Alt+Q）一键向多个 AI 同时提问\n- 多平台支持：内置 DeepSeek、豆包、文心一言、通义千问，支持自定义 AI 平台\n- 自动填充发送：在 AI 页面自动填入问题并发送，无需手动切换页面\n- 浮动面板：支持 AI 多选、追加追问、固定/最小化、拖拽移动与缩放\n- 历史记录：自动记录每次提问与回答链接，按会话分组展示，可回跳到对应会话\n- 回答完成通知：AI 回答完成后弹系统通知提醒\n- 打开方式可选：标签页或独立窗口（弹窗模式）\n\n优化：\n- 历史记录日期改为中文年月日时分秒格式\n- 优化各 AI 站点输入框/发送按钮选择器，提升自动发送成功率\n- 设置页支持全屏标签页打开，布局更宽敞\n\n修复：\n- 修复注入网页后 logo 图标加载被拦截、显示占位符的问题\n- 修复历史记录链接跳转不匹配会话的问题",
+    "en": "AskAll 1.0.0 official release: select text and ask multiple AI platforms at once, with auto-send and history.\n\nNew features:\n- Select text and ask multiple AIs simultaneously via context menu or hotkey (Alt+Q by default)\n- Built-in support for DeepSeek, Doubao, Wenxin Yiyan, Tongyi Qianwen, plus custom AI platforms\n- Auto-fill and send questions on AI pages automatically\n- Floating panel: multi-AI selection, follow-up questions, pin/minimize, drag & resize\n- History: auto-record questions and answer links, grouped by conversation, with back-link to sessions\n- Desktop notification when an AI finishes answering\n- Configurable open mode: tabs or popup windows\n\nImprovements:\n- Chinese date-time format (YYYY年MM月DD日 HH时MM分SS秒) in history\n- Optimized input/send selectors for AI sites to improve auto-send success rate\n- Options page opens in a full tab with a wider layout\n\nFixes:\n- Fixed logo icon blocked by web_accessible_resources and fallback placeholder shown in injected pages\n- Fixed history links not navigating to the matching session"
   }
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Bot, Settings, History } from 'lucide-react';
+import { Settings, History } from 'lucide-react';
 import AiConfigPanel from './AiConfigPanel';
 import HistoryPanel from './HistoryPanel';
 import { Button } from './ui/button';
@@ -27,14 +27,10 @@ export default function App() {
 
   return (
     <div className="app-container relative">
-      <span className="absolute bottom-1 right-2 select-none text-[10px] leading-none text-muted-foreground/60">
+      <span className="absolute bottom-1 left-2 select-none text-[10px] leading-none text-muted-foreground/60">
         v{version}
       </span>
-      <aside className="flex w-[180px] shrink-0 flex-col gap-1 overflow-y-auto border-r bg-card p-3">
-        <div className="mb-2 flex items-center gap-2 px-2 py-1.5">
-          <Bot className="h-5 w-5 text-primary" />
-          <span className="text-sm font-semibold tracking-tight">AskAll 齐问</span>
-        </div>
+      <aside className="flex w-[180px] shrink-0 flex-col gap-1 overflow-y-auto border-r bg-card px-3 pb-12 pt-3">
         <nav className="flex flex-col gap-1">
           <Button
             variant={activeTab === 'config' ? 'secondary' : 'ghost'}
@@ -62,7 +58,7 @@ export default function App() {
           </Button>
         </nav>
       </aside>
-      <main className="min-w-0 flex-1 overflow-y-auto p-4">
+      <main className="min-w-0 flex-1 overflow-y-auto px-4 pb-10 pt-4">
         {activeTab === 'config' ? (
           <AiConfigPanel openMode={openMode} onModeChange={handleModeChange} />
         ) : (
