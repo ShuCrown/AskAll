@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口默认权限：窗口控制、事件、opener、process",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-create",
+    "core:event:default",
+    "opener:default",
+    "opener:allow-open-url",
+    "process:default"
+  ]
+}
