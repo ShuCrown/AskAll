@@ -23,7 +23,9 @@ export default defineBackground(() => {
     });
   });
 
-  // 右键菜单点击：向当前页面的内容脚本发送消息，打开浮动面板
+  // 右键菜单点击：向当前页面的内容脚本发送消息，打开浮动面板。
+  // 若内容脚本未注入（页面在扩展安装/更新前已打开，浏览器不会向旧页面注入），
+  // 先动态注入内容脚本再重试；只有注入也失败（chrome:// 等受限页面）才回退为直接发送。
   browser.contextMenus.onClicked.addListener(async (info) => {
     if (info.menuItemId !== MENU_ID || !info.selectionText) return;
     const tabs = await browser.tabs.query({
@@ -32,15 +34,28 @@ export default defineBackground(() => {
     });
     const tabId = tabs[0]?.id;
     if (tabId == null) return;
-    try {
-      await browser.tabs.sendMessage(tabId, {
+
+    const showPanel = () =>
+      browser.tabs.sendMessage(tabId, {
         type: 'SHOW_PANEL',
         text: info.selectionText,
       });
+
+    try {
+      await showPanel();
     } catch (e) {
-      // 内容脚本未注入（浏览器内部页/受限页面）时，回退为直接发送
-      console.warn('[multi-ai-ask] 无法打开面板，回退为直接提问:', e);
-      handleAsk(info.selectionText);
+      // 先动态注入内容脚本，再重试打开面板
+      try {
+        await browser.scripting.executeScript({
+          target: { tabId },
+          files: ['/content-scripts/content.js'],
+        });
+        await showPanel();
+      } catch (err) {
+        // 受限页面无法注入，回退为直接发送
+        console.warn('[multi-ai-ask] 无法注入内容脚本，回退为直接提问:', err);
+        handleAsk(info.selectionText);
+      }
     }
   });
 

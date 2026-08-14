@@ -68,7 +68,8 @@ export default function AiConfigPanel({
     storage.getItem('local:selectAllByDefault').then((v) => {
       if (typeof v === 'boolean') setSelectAllByDefault(v);
     });
-    storage.getItem('local:autoSend').then((v) => {
+    storage.getItem('sync:autoSend').then((v) => {
+      // 默认不开启自动发送：初始弹选择面板确认，用户主动开启后才直接问答
       if (typeof v === 'boolean') setAutoSend(v);
     });
     storage.getItem('local:showOnSelect').then((v) => {
@@ -124,7 +125,8 @@ export default function AiConfigPanel({
 
   const toggleAutoSend = async (checked: boolean) => {
     setAutoSend(checked);
-    await storage.setItem('local:autoSend', checked);
+    // sync 存储：与浮动面板共用同一开关，跨设备同步
+    await storage.setItem('sync:autoSend', checked);
   };
 
   const toggleShowOnSelect = async (checked: boolean) => {

@@ -5,7 +5,8 @@ import type { AiConfig } from '@/utils/aiConfig';
 import type { AskTask, AiStatus } from '@/utils/task';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
-const AUTO_SEND_KEY = 'local:autoSend';
+// 用 sync 存储：自动发送开关跨设备同步，避免 Win/Mac 行为不一致
+const AUTO_SEND_KEY = 'sync:autoSend';
 
 interface FloatingPanelProps {
   text: string;
@@ -145,6 +146,7 @@ export default function FloatingPanel({
       if (typeof v === 'boolean') setShowAfterSend(v);
     });
     storage.getItem(AUTO_SEND_KEY).then((v) => {
+      // 默认不开启自动发送：初始弹选择面板确认，用户主动开启后才直接问答
       const val = typeof v === 'boolean' ? v : false;
       setAutoSend(val);
       // 视图由自动发送开关决定：开启→直接进结果面板；关闭→显示选择面板
