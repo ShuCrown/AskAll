@@ -48,10 +48,10 @@ export default defineConfig({
     action: {
       default_title: 'AskAll 齐问',
     },
-    // 允许网页/内容脚本加载 public/ai 下的品牌 SVG（否则 content script 中 img 会被拦截）
+    // 允许网页/内容脚本加载 public 下的品牌资源（否则 content script 中 img 会被拦截）
     web_accessible_resources: [
       {
-        resources: ['ai/*'],
+        resources: ['ai/*', 'icon/*'],
         matches: ['<all_urls>'],
       },
     ],

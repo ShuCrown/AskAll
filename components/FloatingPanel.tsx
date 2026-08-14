@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Settings, X } from 'lucide-react';
+import { Minus, Pin, Settings, X } from 'lucide-react';
 import { mergeConfigs } from '@/utils/aiConfig';
 import type { AiConfig } from '@/utils/aiConfig';
 
@@ -27,7 +27,20 @@ export default function FloatingPanel({
   const [autoSend, setAutoSend] = useState(false);
   const [followUp, setFollowUp] = useState('');
   const [replies, setReplies] = useState<Record<string, string>>({});
+  const [logoFailed, setLogoFailed] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [minimized, setMinimized] = useState(false);
   const sentRef = useRef(false);
+
+  // 将「固定/收起」状态同步给 content script：
+  // 固定或收起到小浮窗时，点击面板外部不应自动关闭面板
+  useEffect(() => {
+    window.dispatchEvent(
+      new CustomEvent('askall-panel-state', {
+        detail: { pinned, minimized },
+      }),
+    );
+  }, [pinned, minimized]);
 
   // 拖拽位置 & 四边调整大小
   const [pos, setPos] = useState(position ?? { left: 100, top: 100 });
@@ -217,13 +230,15 @@ export default function FloatingPanel({
     }
   };
 
-  const openSettings = () => {
-    browser.runtime.sendMessage({ type: 'OPEN_SETTINGS' });
-  };
-
   // 查看原文：让后台切换到该 AI 已打开的聊天标签页，找不到才新开
   const openAiTab = (ai: AiConfig) => {
     browser.runtime.sendMessage({ type: 'OPEN_AI_TAB', url: buildUrl(ai) });
+  };
+
+  const togglePinned = () => setPinned((p) => !p);
+
+  const openSettings = () => {
+    browser.runtime.sendMessage({ type: 'OPEN_SETTINGS' });
   };
 
   // 在结果面板手动输入新的问题，直接向已打开的聊天窗口发送，不新建标签页/弹窗
@@ -241,7 +256,10 @@ export default function FloatingPanel({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
-      if (e.key === 'Enter' && view === 'select') handleSend();
+      // 未勾选任何平台时回车失效，不允许发送
+      if (e.key === 'Enter' && view === 'select' && selectedList.length > 0) {
+        handleSend();
+      }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
@@ -262,6 +280,28 @@ export default function FloatingPanel({
   return (
     <div style={styles.overlay} onClick={(e) => e.stopPropagation()}>
       <style>{panelCss}</style>
+      {minimized ? (
+        <button
+          type="button"
+          style={styles.miniBtn}
+          onClick={() => setMinimized(false)}
+          title="还原齐问面板"
+        >
+          {logoFailed ? (
+            <span style={styles.miniLogoFallback}>齐</span>
+          ) : (
+            <img
+              src={(browser.runtime.getURL as (p: string) => string)(
+                '/icon/128.png',
+              )}
+              alt="齐问"
+              className="askall-logo-img"
+              style={styles.miniLogo}
+              onError={() => setLogoFailed(true)}
+            />
+          )}
+        </button>
+      ) : (
       <div
         ref={cardRef}
         style={{
@@ -276,18 +316,58 @@ export default function FloatingPanel({
         {/* 顶部标题栏：可拖动 */}
         <div style={styles.header} onMouseDown={(e) => startDrag('move', e)}>
           <div style={styles.title}>
-            <span style={styles.logo}>齐</span>
+            {logoFailed ? (
+              <span style={styles.logoFallback}>齐</span>
+            ) : (
+              <img
+                src={(browser.runtime.getURL as (p: string) => string)(
+                  '/icon/128.png',
+                )}
+                alt="齐问"
+                className="askall-logo-img"
+                style={styles.logo}
+                onError={() => setLogoFailed(true)}
+              />
+            )}
             <span>齐问</span>
           </div>
-          <button
-            type="button"
-            style={styles.iconBtn}
-            onClick={onClose}
-            aria-label="关闭"
-            title="关闭"
-          >
-            <X style={{ width: 16, height: 16 }} />
-          </button>
+          <div style={styles.headerActions}>
+            <button
+              type="button"
+              style={
+                pinned
+                  ? { ...styles.iconBtn, ...styles.iconBtnActive }
+                  : styles.iconBtn
+              }
+              onClick={togglePinned}
+              aria-label={pinned ? '取消固定' : '固定面板'}
+              title={
+                pinned
+                  ? '取消固定（点击面板外将关闭）'
+                  : '固定面板（点击面板外不关闭）'
+              }
+            >
+              <Pin style={{ width: 16, height: 16 }} />
+            </button>
+            <button
+              type="button"
+              style={styles.iconBtn}
+              onClick={() => setMinimized(true)}
+              aria-label="收起到右下角"
+              title="收起到右下角小浮窗"
+            >
+              <Minus style={{ width: 16, height: 16 }} />
+            </button>
+            <button
+              type="button"
+              style={styles.iconBtn}
+              onClick={onClose}
+              aria-label="关闭"
+              title="关闭"
+            >
+              <X style={{ width: 16, height: 16 }} />
+            </button>
+          </div>
         </div>
 
         {/* 中间内容区：可滚动 */}
@@ -326,6 +406,7 @@ export default function FloatingPanel({
                   <label
                     key={ai.id}
                     className="askall-item"
+                    onClick={() => toggleAi(ai.id)}
                     style={{
                       ...styles.item,
                       ...(selected ? styles.itemSelected : {}),
@@ -399,39 +480,26 @@ export default function FloatingPanel({
         )}
         </div>
 
-        {/* 底部栏：设置 + 发送/输入 */}
+        {/* 底部栏：发送/输入 */}
         <div style={styles.footer}>
-          <button
-            type="button"
-            style={styles.footerSettingsBtn}
-            onClick={openSettings}
-            aria-label="设置"
-            title="设置"
-          >
-            <Settings style={{ width: 16, height: 16 }} />
-          </button>
           {view === 'select' ? (
-            <>
-              <input
-                readOnly
-                placeholder="Enter 发送，Esc 关闭"
-                style={styles.footerInput}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleSend();
-                }}
-              />
+            <div style={styles.selectFooter}>
               <button
                 type="button"
                 style={{
                   ...styles.sendBtn,
-                  opacity: selectedList.length === 0 ? 0.6 : 1,
+                  width: '100%',
+                  ...(selectedList.length === 0
+                    ? styles.sendBtnDisabled
+                    : {}),
                 }}
                 onClick={handleSend}
                 disabled={selectedList.length === 0}
               >
                 开始提问
               </button>
-            </>
+              <div style={styles.footerHint}>按 Enter 发送 · Esc 关闭</div>
+            </div>
           ) : (
             <>
               <input
@@ -455,6 +523,26 @@ export default function FloatingPanel({
           )}
         </div>
 
+        {/* 底部信息栏：插件名 / 版本 / 设置（仅结果面板展示） */}
+        {view === 'result' && (
+          <div style={styles.infoBar}>
+            <span style={styles.infoName}>齐问</span>
+            <span style={styles.infoVersion}>
+              v{browser.runtime.getManifest().version}
+            </span>
+            <button
+              type="button"
+              style={styles.infoSettingsBtn}
+              onClick={openSettings}
+              aria-label="设置"
+              title="设置"
+            >
+              <Settings style={{ width: 14, height: 14 }} />
+              设置
+            </button>
+          </div>
+        )}
+
         {/* 四边 + 四角拖拽缩放 */}
         <div style={styles.resizeN} onMouseDown={(e) => startDrag('n', e)} />
         <div style={styles.resizeS} onMouseDown={(e) => startDrag('s', e)} />
@@ -465,6 +553,7 @@ export default function FloatingPanel({
         <div style={styles.resizeSE} onMouseDown={(e) => startDrag('se', e)} />
         <div style={styles.resizeSW} onMouseDown={(e) => startDrag('sw', e)} />
       </div>
+      )}
     </div>
   );
 }
@@ -558,6 +647,19 @@ const panelCss = `
   .askall-item { cursor: pointer; }
   .askall-item:hover { background: hsl(220 14.3% 95.9%); }
   .askall-item:hover .askall-checkbox { border-color: hsl(221.2 83.2% 53.3%); }
+  /* logo 图标：彻底去除宿主网页全局样式可能注入的边框/描边/阴影 */
+  .askall-logo-img {
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    max-width: none !important;
+    max-height: none !important;
+    filter: none !important;
+  }
 `;
 
 const styles: Record<string, React.CSSProperties> = {
@@ -595,6 +697,15 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
     paddingBottom: 10,
   },
+  headerActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 2,
+  },
+  iconBtnActive: {
+    color: 'hsl(221.2 83.2% 53.3%)',
+    background: 'hsl(221.2 83.2% 53.3% / 0.12)',
+  },
   body: {
     flex: 1,
     overflowY: 'auto',
@@ -611,19 +722,56 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 8,
     flexShrink: 0,
     paddingTop: 10,
-    borderTop: '1px solid hsl(220 13% 91%)',
     marginTop: 10,
   },
-  footerSettingsBtn: {
+  // 灰色背景铺满卡片底部一行；无分割线
+  infoBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    flexShrink: 0,
+    marginTop: 10,
+    marginLeft: -12,
+    marginRight: -12,
+    marginBottom: -12,
+    padding: '8px 12px',
+    background: 'hsl(220 14.3% 95.9%)',
+  },
+  infoName: {
+    fontSize: 12,
+    fontWeight: 400,
+    color: 'hsl(224 71.4% 4.1%)',
+  },
+  infoVersion: {
+    fontSize: 11,
+    color: 'hsl(220 8.9% 46.1% / 0.8)',
+  },
+  infoSettingsBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
     background: 'transparent',
     border: 'none',
     cursor: 'pointer',
-    padding: 4,
-    borderRadius: 6,
+    fontSize: 12,
     color: 'hsl(220 8.9% 46.1%)',
-    flexShrink: 0,
+    padding: '3px 6px',
+    borderRadius: 6,
+  },
+  selectFooter: {
     display: 'flex',
-    alignItems: 'center',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: 6,
+    width: '100%',
+  },
+  footerHint: {
+    fontSize: 11,
+    color: 'hsl(220 8.9% 46.1% / 0.7)',
+    textAlign: 'center',
+    userSelect: 'none',
+    lineHeight: 1.4,
   },
   footerInput: {
     flex: 1,
@@ -647,6 +795,15 @@ const styles: Record<string, React.CSSProperties> = {
   logo: {
     width: 24,
     height: 24,
+    objectFit: 'contain',
+    display: 'block',
+    border: 'none',
+    outline: 'none',
+    boxShadow: 'none',
+  },
+  logoFallback: {
+    width: 24,
+    height: 24,
     borderRadius: 6,
     background: 'hsl(221.2 83.2% 53.3%)',
     color: 'hsl(210 40% 98%)',
@@ -654,6 +811,44 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'center',
     fontSize: 13,
+    fontWeight: 700,
+  },
+  miniBtn: {
+    position: 'fixed',
+    right: 16,
+    bottom: 16,
+    zIndex: 2147483647,
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    border: 'none',
+    background: 'transparent',
+    padding: 0,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'auto',
+  },
+  miniLogo: {
+    width: 40,
+    height: 40,
+    objectFit: 'contain',
+    display: 'block',
+    border: 'none',
+    outline: 'none',
+    boxShadow: 'none',
+  },
+  miniLogoFallback: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    background: 'hsl(221.2 83.2% 53.3%)',
+    color: 'hsl(210 40% 98%)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 22,
     fontWeight: 700,
   },
   iconBtn: {
@@ -785,6 +980,11 @@ const styles: Record<string, React.CSSProperties> = {
     transition: 'background 0.15s',
     flexShrink: 0,
     whiteSpace: 'nowrap',
+  },
+  sendBtnDisabled: {
+    background: 'hsl(220 14.3% 95.9%)',
+    color: 'hsl(220 8.9% 46.1% / 0.55)',
+    cursor: 'not-allowed',
   },
   hint: {
     textAlign: 'center',

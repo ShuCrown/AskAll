@@ -109,8 +109,25 @@ export default defineContentScript({
       }
     }
 
+    // 面板「固定 / 收起」状态（由 FloatingPanel 通过自定义事件同步）：
+    // 固定或收起到右下角小浮窗时，点击面板外部不应自动关闭面板
+    let panelState = { pinned: false, minimized: false };
+    window.addEventListener(
+      'askall-panel-state',
+      ((
+        e: CustomEvent<{ pinned: boolean; minimized: boolean }>,
+      ) => {
+        panelState = e.detail ?? panelState;
+      }) as EventListener,
+    );
+
     document.addEventListener('mousedown', (e) => {
-      if (container && !container.contains(e.target as Node)) {
+      if (
+        container &&
+        !container.contains(e.target as Node) &&
+        !panelState.pinned &&
+        !panelState.minimized
+      ) {
         hidePanel();
       }
     });
