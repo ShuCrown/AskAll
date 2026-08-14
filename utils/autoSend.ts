@@ -4,26 +4,41 @@ import type { AiSelectors } from '@/utils/aiConfig';
  * 注入到 AI 页面的自动填充并发送函数。
  *
  * 注意：该函数会被 `browser.scripting.executeScript` 注入到目标页面，
- * 运行在页面上下文中，因此必须写成「纯函数」——不能引用任何外部变量、
+ * 运行在页面上下文（MAIN world），因此必须写成「纯函数」——不能引用任何外部变量、
  * 模块、闭包，所有依赖都必须通过 args 传入。
  *
- * 注入脚本运行在 content script 的 ISOLATED world，Chrome 原生全局 `chrome`
- * 可用（wxt 的 `browser` polyfill 是模块局部变量，注入脚本访问不到），
- * 这里用局部声明补类型。
+ * 运行在 MAIN world 时页面没有 `chrome.runtime`。因此「回传回复到后台」有两种通道：
+ * 1. 若存在 `chrome.runtime`（ISOLATED world）→ 直接 sendMessage；
+ * 2. 否则派发 `askall:ai-reply` CustomEvent，由同页面 ISOLATED world 的
+ *    content script 桥接转发到后台（见 content.tsx）。
  */
+
 declare const chrome: {
   runtime: {
     sendMessage: (message: {
       type: string;
       aiName?: string;
       text?: string;
+      taskId?: string;
+      aiId?: string;
     }) => void;
   };
 };
+
+interface ReplyPayload {
+  type: string;
+  aiName?: string;
+  text?: string;
+  taskId?: string;
+  aiId?: string;
+}
+
 export async function autoFillAndSend(
   text: string,
   selectors: AiSelectors,
   aiName: string,
+  taskId: string,
+  aiId: string,
 ) {
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -31,60 +46,170 @@ export async function autoFillAndSend(
   const editorContainsText = (el: HTMLElement, target: string): boolean =>
     (el.textContent || '').includes(target);
 
-  // 向后台发送消息。MAIN world 下页面没有 chrome 全局，静默跳过回执通知。
-  const sendToBackground = (msg: {
-    type: string;
-    aiName?: string;
-    text?: string;
-  }) => {
+  // 向后台发送消息的回执。MAIN world 无 chrome.runtime，改派发 CustomEvent 由
+  // content script 桥接；ISOLATED world 直接 sendMessage（两种情况互斥，避免重复）。
+  const sendToBackground = (msg: ReplyPayload) => {
     try {
       if (typeof chrome !== 'undefined' && chrome?.runtime?.sendMessage) {
         chrome.runtime.sendMessage(msg);
       }
     } catch {
-      /* 页面关闭等场景下忽略 */
+      /* ignore */
+    }
+    try {
+      window.dispatchEvent(new CustomEvent('askall:ai-reply', { detail: msg }));
+    } catch {
+      /* ignore */
     }
   };
 
-  // 等待输入框出现（最多 60 次 x 500ms ≈ 30s）。
-  // 用 querySelectorAll 遍历同选择器的所有节点，选「可见且可编辑」的那一个：
-  // 避免页面存在多个 textarea 时 querySelector 命中隐藏输入框，导致文字填错元素、发送无反应。
-  let input: HTMLElement | null = null;
-  const inputCandidates: string[] = selectors.inputCandidates || [
-    selectors.input,
-  ];
-  for (let i = 0; i < 60 && !input; i++) {
-    for (const sel of inputCandidates) {
+  // ---------- 输入框识别：语义评分 + 选择器兜底 ----------
+  const isVisible = (el: Element): boolean => {
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const isEditable = (el: Element): boolean =>
+    (el as HTMLElement).isContentEditable === true ||
+    el.tagName === 'TEXTAREA' ||
+    (el.tagName === 'INPUT' &&
+      !['button', 'submit', 'hidden', 'checkbox', 'radio', 'file'].includes(
+        (el as HTMLInputElement).type,
+      ));
+
+  const scoreInput = (el: Element): number => {
+    let s = 0;
+    if ((el as HTMLElement).isContentEditable) s += 40;
+    if (el.getAttribute('role') === 'textbox') s += 30;
+    if (el.tagName === 'TEXTAREA') s += 25;
+    if (el.tagName === 'INPUT') s += 15;
+    if (isVisible(el)) s += 20;
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > window.innerHeight * 0.5) s += 15; // 位于页面底部
+    const ph = (el.getAttribute('placeholder') || '').trim();
+    if (/提问|输入|消息|发送|请输入|问问|message|ask|type/i.test(ph)) s += 15;
+    if (document.activeElement === el) s += 20;
+    if (rect.width > 200) s += 10;
+    return s;
+  };
+
+  const findInputBySelectors = (): HTMLElement | null => {
+    const candidates = selectors.inputCandidates?.length
+      ? selectors.inputCandidates
+      : selectors.input
+        ? [selectors.input]
+        : [];
+    for (const sel of candidates) {
       const nodes = document.querySelectorAll<HTMLElement>(sel);
       for (const el of nodes) {
-        if (
-          el.offsetParent !== null &&
-          (el.tagName === 'TEXTAREA' ||
-            el.tagName === 'INPUT' ||
-            el.isContentEditable)
-        ) {
-          input = el;
-          break;
-        }
+        if (isVisible(el) && isEditable(el)) return el;
       }
-      if (input) break;
     }
-    if (!input) await wait(500);
-  }
+    return null;
+  };
 
+  const findInputSemantic = (): HTMLElement | null => {
+    const els = new Set<Element>([
+      ...document.querySelectorAll('textarea'),
+      ...document.querySelectorAll('input'),
+      ...document.querySelectorAll('[contenteditable="true"]'),
+      ...document.querySelectorAll('[contenteditable="plaintext-only"]'),
+      ...document.querySelectorAll('[role="textbox"]'),
+    ]);
+    let best: HTMLElement | null = null;
+    let bestScore = -1;
+    els.forEach((el) => {
+      if (!isEditable(el)) return;
+      const s = scoreInput(el);
+      if (s > bestScore) {
+        best = el as HTMLElement;
+        bestScore = s;
+      }
+    });
+    return best;
+  };
+
+  // 等待输入框出现：优先选择器，其次语义评分；MutationObserver + rAF + 短轮询并行触发，
+  // 不再按固定 500ms 慢轮询，避免「等待页面 complete」之外再叠加长等待。
+  const waitForInput = (
+    timeoutMs = 20000,
+  ): Promise<HTMLElement | null> =>
+    new Promise((resolve) => {
+      let settled = false;
+
+      const probe = (): HTMLElement | null =>
+        findInputBySelectors() || findInputSemantic();
+
+      let input = probe();
+      if (input) {
+        resolve(input);
+        return;
+      }
+
+      const cleanup = () => {
+        observer?.disconnect();
+        clearInterval(timer);
+        clearTimeout(bail);
+        cancelAnimationFrame(raf);
+      };
+      const finish = (el: HTMLElement | null) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(el);
+      };
+      const tryAgain = () => {
+        const el = probe();
+        if (el) finish(el);
+      };
+
+      let observer: MutationObserver | null = null;
+      try {
+        observer = new MutationObserver(() => tryAgain());
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['class', 'contenteditable', 'role', 'placeholder'],
+        });
+      } catch {
+        observer = null;
+      }
+
+      const timer = setInterval(tryAgain, 150);
+      const bail = setTimeout(() => finish(null), timeoutMs);
+      let raf = 0;
+      const loop = () => {
+        if (settled) return;
+        if (!probe()) raf = requestAnimationFrame(loop);
+        else finish(probe());
+      };
+      raf = requestAnimationFrame(loop);
+    });
+
+  const input = await waitForInput();
   if (!input) {
     console.error('❌ [multi-ai-ask] 未找到输入框');
+    sendToBackground({
+      type: 'AI_REPLY_DONE',
+      aiName,
+      taskId,
+      aiId,
+      text: '【AskAll】未能在页面中找到输入框，请在平台手动发送。',
+    });
     return;
   }
 
+  sendToBackground({ type: 'AI_SENDING', aiName, taskId, aiId });
+
   // 聚焦并设置值
   input.focus();
-  await wait(200);
+  await wait(150);
 
   if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
     // 受控组件：通过原生 setter + InputEvent 触发框架状态更新。
-    // 使用 InputEvent（而非普通 Event）携带 data 和 inputType，
-    // 确保 DeepSeek/豆包 等 React 组件能正确识别输入并启用发送按钮。
     const proto =
       input.tagName === 'TEXTAREA'
         ? HTMLTextAreaElement.prototype
@@ -93,7 +218,6 @@ export async function autoFillAndSend(
     if (setter) setter.call(input, text);
     else (input as HTMLInputElement).value = text;
 
-    // beforeinput + input：现代框架（React 17+）优先监听 beforeinput
     input.dispatchEvent(
       new InputEvent('beforeinput', {
         bubbles: true,
@@ -111,9 +235,7 @@ export async function autoFillAndSend(
     );
     input.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (input.isContentEditable) {
-    // contenteditable。注意：千问/通义 用的是 Slate.js 富文本编辑器，
-    // execCommand('insertText') 只改 DOM 不更新 Slate 内部状态，发送按钮会一直 disabled。
-    // 必须派发 beforeinput/input（inputType: insertText）或 paste 事件走编辑器事件管线。
+    // contenteditable。千问/通义 是 Slate.js 编辑器，必须走事件管线。
     input.focus();
     const range = document.createRange();
     range.selectNodeContents(input);
@@ -121,7 +243,6 @@ export async function autoFillAndSend(
     selection?.removeAllRanges();
     selection?.addRange(range);
 
-    // 方法1：beforeinput + input（Slate 及多数编辑器都监听这两个原生事件）
     input.dispatchEvent(
       new InputEvent('beforeinput', {
         bubbles: true,
@@ -138,9 +259,7 @@ export async function autoFillAndSend(
       }),
     );
 
-    // 方法2：paste 剪贴板事件（部分编辑器只通过 onPaste 读取内容）
     if (!editorContainsText(input, text)) {
-      input.dispatchEvent(new Event('input', { bubbles: true }));
       try {
         const dt = new DataTransfer();
         dt.setData('text/plain', text);
@@ -156,7 +275,6 @@ export async function autoFillAndSend(
       }
     }
 
-    // 方法3：execCommand 兜底（普通 contenteditable，非 Slate）
     if (!editorContainsText(input, text)) {
       try {
         document.execCommand('insertText', false, text);
@@ -166,12 +284,9 @@ export async function autoFillAndSend(
     }
   }
 
-  // 等待框架处理输入状态（缩短等待，剩余等待交给发送阶段的轮询）
-  await wait(200);
+  await wait(150);
 
   // 判断按钮是否可用。
-  // 兼容各平台不同的禁用表达：原生 disabled / aria-disabled / data-disabled /
-  // data-loading（豆包） / CSS 禁用类。
   const isBtnDisabled = (btn: HTMLElement): boolean =>
     (btn as HTMLButtonElement).disabled === true ||
     btn.hasAttribute('disabled') ||
@@ -181,13 +296,7 @@ export async function autoFillAndSend(
     btn.classList.contains('disabled') ||
     btn.classList.contains('is-disabled');
 
-  // 点击发送按钮：对任意标签派发完整的 pointer + mouse + click 事件序列。
-  // 不同平台/组件库监听的触发事件各不相同：
-  // - React onClick 监听冒泡 click
-  // - 部分自定义 Button（如豆包 data-dbx-name="button"）监听 pointerdown/pointerup
-  // - 部分 SPA 监听 mousedown/mouseup
-  // 统一派发完整序列保证全部命中；带坐标模拟真实点击，避免 detail=0 被忽略。
-  // 注意：不再调用 .click()，避免「已派发 click 事件」+「.click()」导致重复发送。
+  // 点击发送按钮：对任意标签派发完整 pointer + mouse + click 事件序列。
   const clickBtn = (btn: HTMLElement) => {
     const rect = btn.getBoundingClientRect();
     const opts: MouseEventInit = {
@@ -204,12 +313,8 @@ export async function autoFillAndSend(
     btn.dispatchEvent(new MouseEvent('click', opts));
   };
 
-  // 发送按钮：优先等待「平台专属」按钮（candidates[0]）出现并可用，点击后用
-  // 「输入框是否被清空」验证是否真正发送成功；失败则快速重试/兜底，
-  // 避免「点一次就放弃、5 秒后才走 Enter 兜底」造成的发送延迟和豆包静默失败。
   let sent = false;
 
-  // 发送成功的信号：输入框被清空（成功发送后框架会清空输入，或重建输入框）
   const inputCleared = (): boolean => {
     if (!input || !input.isConnected) return true; // 元素被移除/重渲染 = 已发送
     const v =
@@ -219,7 +324,6 @@ export async function autoFillAndSend(
     return v.trim().length === 0;
   };
 
-  // 点击并验证：点击后轮询输入框是否被清空
   const clickAndVerify = async (btn: HTMLElement, waitMs: number) => {
     clickBtn(btn);
     const start = Date.now();
@@ -230,13 +334,55 @@ export async function autoFillAndSend(
     return false;
   };
 
+  // ---------- 发送按钮识别：专属选择器优先，语义评分兜底 ----------
+  const scoreSendButton = (btn: HTMLElement): number => {
+    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+    const title = (btn.getAttribute('title') || '').toLowerCase();
+    const text = (btn.textContent || '').trim().toLowerCase();
+    const cls = (typeof btn.className === 'string' ? btn.className : '').toLowerCase();
+    const id = (btn.id || '').toLowerCase();
+    let s = 0;
+    if (/发送|send/.test(label)) s += 100;
+    if (/发送|send/.test(title)) s += 80;
+    if (text.length > 0 && text.length <= 8 && /发送|send/.test(text)) s += 80;
+    if (/send/.test(cls) || /send/.test(id)) s += 40;
+    if (btn.tagName === 'BUTTON') s += 20;
+    if (input) {
+      const ir = input.getBoundingClientRect();
+      const br = btn.getBoundingClientRect();
+      const dy = Math.abs(
+        (br.top + br.bottom) / 2 - (ir.top + ir.bottom) / 2,
+      );
+      if (dy < 200) s += 30;
+    }
+    return s;
+  };
+
+  const findSendButtonSemantic = (): HTMLElement | null => {
+    const candidates = document.querySelectorAll<HTMLElement>(
+      'button, [role="button"]',
+    );
+    let best: HTMLElement | null = null;
+    let bestScore = 0;
+    for (const el of candidates) {
+      if (isBtnDisabled(el)) continue;
+      const s = scoreSendButton(el);
+      // 阈值 80：避免误选「联网搜索」等工具栏按钮
+      if (s >= 80 && s > bestScore) {
+        best = el;
+        bestScore = s;
+      }
+    }
+    return best;
+  };
+
   if (selectors.sendButton) {
     const candidates: string[] = selectors.sendButtonCandidates || [
       selectors.sendButton,
     ];
     const specific = candidates[0];
 
-    // 阶段1：等专属按钮（最具体）可用后点击并验证，最多约 3s
+    // 阶段1：等专属按钮（最具体）可用后点击并验证
     for (let attempt = 0; attempt < 20 && !sent; attempt++) {
       const btn = specific
         ? document.querySelector<HTMLElement>(specific)
@@ -244,10 +390,10 @@ export async function autoFillAndSend(
       if (btn && !isBtnDisabled(btn)) {
         sent = await clickAndVerify(btn, 2500);
       }
-      if (!sent) await wait(150);
+      if (!sent) await wait(120);
     }
 
-    // 阶段2：专属按钮点击后输入未被清空，再尝试一次（首次点击可能被框架忽略）
+    // 阶段2：专属按钮点击后输入未被清空，再尝试一次
     if (!sent && specific) {
       const btn = document.querySelector<HTMLElement>(specific);
       if (btn && !isBtnDisabled(btn)) {
@@ -255,8 +401,7 @@ export async function autoFillAndSend(
       }
     }
 
-    // 阶段3：仍未成功，遍历其余「安全」候选（均为带 id/aria-label/class 的选择器，
-    // 不含 div[role="button"] 等宽泛选择器，避免误点搜索/工具栏按钮）
+    // 阶段3：遍历其余安全候选（均带 id/aria-label/class，不含宽泛 div[role="button"]）
     for (let c = 1; c < candidates.length && !sent; c++) {
       const sel = candidates[c];
       if (!sel) continue;
@@ -267,11 +412,18 @@ export async function autoFillAndSend(
     }
   }
 
-  // 兜底：模拟回车（textarea/input 平台，如 DeepSeek/文心 Enter 可直接发送），
-  // 并轮询验证以尽量缩短发送延迟
+  // 阶段4：语义兜底 —— 平台更新导致选择器失效时的最后手段
+  if (!sent) {
+    const btn = findSendButtonSemantic();
+    if (btn) {
+      sent = await clickAndVerify(btn, 2000);
+    }
+  }
+
+  // 兜底：模拟回车（textarea/input 平台）
   if (!sent && input) {
     input.focus();
-    await wait(100);
+    await wait(80);
     const keyboardEventInit: KeyboardEventInit = {
       key: 'Enter',
       code: 'Enter',
@@ -290,73 +442,114 @@ export async function autoFillAndSend(
     }
   }
 
-  // 发送已触发，启动「回答完成检测」：轮询回复块文本，稳定后通知后台弹提醒。
-  // 不 await，让它在页面后台继续运行。
-  startReplyWatch(selectors, aiName);
+  if (!sent) {
+    sendToBackground({
+      type: 'AI_REPLY_DONE',
+      aiName,
+      taskId,
+      aiId,
+      text: '【AskAll】未能自动发送，请在平台手动发送。',
+    });
+    return;
+  }
+
+  // 发送成功：启动「回答检测」：MutationObserver 实时提取 + 短轮询判定完成。
+  // 不 await，让它随注入脚本在页面后台继续运行。
+  startReplyWatch(selectors, aiName, taskId, aiId);
 
   /**
-   * 回答完成检测（纯函数，随注入脚本运行在页面上下文）。
+   * 回答检测（纯函数，注入脚本运行在页面上下文）。
    *
-   * 原理：AI 回复是流式输出。每隔 2s 取最后一个「回复块元素」的文本，
-   * 连续 N 次长度不再变化（且非空）即视为回答结束，向后台发送 AI_REPLY_DONE。
-   * 90s 内未完成则静默放弃，避免常驻轮询。
+   * 用 MutationObserver 监听 body 变化：流式输出时 DOM 频繁变更，据此近乎实时地
+   * 提取最新回复并回传 AI_REPLY（streaming）；同时用短轮询兜底，当文本稳定一段时间
+   * 即判定回答完成，回传 AI_REPLY_DONE。120s 内未完成则静默退出。
    */
-  async function startReplyWatch(sels: AiSelectors, name: string) {
+  function startReplyWatch(
+    sels: AiSelectors,
+    name: string,
+    tid: string,
+    aid: string,
+  ) {
     const candidates =
       sels.replyCandidates || [
         '[class*="markdown"]',
         '[class*="answer"]',
         '[class*="response"]',
       ];
-    const STABLE_THRESHOLD = 4; // 连续稳定次数（× 2s 间隔 ≈ 8s）
-    const TIMEOUT = 90_000;
-    const startedAt = Date.now();
 
-    let lastText = '';
-    let stableCount = 0;
-
-    while (Date.now() - startedAt < TIMEOUT) {
-      // 取最后一个匹配到的回复块
+    const extract = (): string => {
       let replyEl: Element | null = null;
       for (const sel of candidates) {
         const nodes = document.querySelectorAll(sel);
         if (nodes.length > 0) {
-          const last = nodes[nodes.length - 1];
-          if (last) replyEl = last;
+          replyEl = nodes[nodes.length - 1] ?? null;
           break;
         }
       }
-      const text = replyEl ? (replyEl.textContent || '').trim() : '';
+      return replyEl ? (replyEl.textContent || '').trim() : '';
+    };
 
+    const TIMEOUT = 120_000;
+    const STABLE_MS = 2500; // 文本稳定 2.5s 视为完成
+    const startedAt = Date.now();
+    let lastText = '';
+    let stableSince = Date.now();
+
+    const finish = () => {
+      try {
+        observer?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      clearInterval(timer);
+    };
+
+    const check = () => {
+      if (Date.now() - startedAt > TIMEOUT) {
+        finish();
+        return;
+      }
+      const text = extract();
       if (text.length > 0) {
-        if (text === lastText) {
-          stableCount++;
-          if (stableCount >= STABLE_THRESHOLD) {
-            console.log(`✅ [multi-ai-ask] ${name} 回答完成`);
-            sendToBackground({
-              type: 'AI_REPLY_DONE',
-              aiName: name,
-              text: text.slice(0, 4000), // 限制长度避免消息过大
-            });
-            return;
-          }
-        } else {
-          stableCount = 0;
+        if (text !== lastText) {
           lastText = text;
-          // 流式输出过程中持续同步最新回复文本到后台
+          stableSince = Date.now();
           sendToBackground({
             type: 'AI_REPLY',
             aiName: name,
+            taskId: tid,
+            aiId: aid,
             text: text.slice(0, 4000),
           });
+        } else if (Date.now() - stableSince > STABLE_MS) {
+          console.log(`✅ [multi-ai-ask] ${name} 回答完成`);
+          sendToBackground({
+            type: 'AI_REPLY_DONE',
+            aiName: name,
+            taskId: tid,
+            aiId: aid,
+            text: text.slice(0, 4000),
+          });
+          finish();
         }
       } else {
-        // 回复尚未开始（或思考中/发送失败），重置基线
+        // 回复尚未开始（或思考中），重置基线
         lastText = '';
-        stableCount = 0;
+        stableSince = Date.now();
       }
-      await wait(2000);
+    };
+
+    let observer: MutationObserver | null = null;
+    try {
+      observer = new MutationObserver(() => check());
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    } catch {
+      observer = null;
     }
-    // 超时未检测到完成，静默退出
+    const timer = setInterval(check, 700);
   }
 }

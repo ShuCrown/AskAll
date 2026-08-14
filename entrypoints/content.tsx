@@ -43,6 +43,18 @@ export default defineContentScript({
       }
     });
 
+    // MAIN↔ISOLATED 桥接：autoSend 注入在 MAIN world 运行，页面无 chrome.runtime，
+    // 它通过派发 askall:ai-reply 事件回传回复进度；本 content script（ISOLATED world）
+    // 监听该事件并转发到后台，从而让结果面板能实时同步各 AI 的回答。
+    window.addEventListener(
+      'askall:ai-reply',
+      ((e: CustomEvent<Record<string, unknown>>) => {
+        const msg = e.detail;
+        if (!msg || typeof msg.type !== 'string') return;
+        browser.runtime.sendMessage(msg).catch(() => {});
+      }) as EventListener,
+    );
+
     function onMouseUp(event: MouseEvent) {
       const target = event.target as Node;
       if (container && container.contains(target)) return;

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Minus, Pin, Settings, X } from 'lucide-react';
 import { mergeConfigs } from '@/utils/aiConfig';
 import type { AiConfig } from '@/utils/aiConfig';
+import type { AskTask, AiStatus } from '@/utils/task';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 const DEFAULT_PANEL_KEY = 'local:defaultFloatingPanel';
@@ -26,7 +27,7 @@ export default function FloatingPanel({
   const [showAfterSend, setShowAfterSend] = useState(true);
   const [autoSend, setAutoSend] = useState(false);
   const [followUp, setFollowUp] = useState('');
-  const [replies, setReplies] = useState<Record<string, string>>({});
+  const [task, setTask] = useState<AskTask | null>(null);
   const [logoFailed, setLogoFailed] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [minimized, setMinimized] = useState(false);
@@ -168,20 +169,20 @@ export default function FloatingPanel({
     storage.setItem(DEFAULT_PANEL_KEY, 'result');
   }, [autoSend, aiConfigs]);
 
-  // 结果面板轮询拉取各 AI 的最新回复
+  // 结果面板轮询拉取当前任务各 AI 的回复（含流式状态）
   useEffect(() => {
     if (view !== 'result') return;
     let timer: ReturnType<typeof setInterval> | undefined;
-    const fetchReplies = async () => {
+    const fetchTask = async () => {
       try {
-        const res = await browser.runtime.sendMessage({ type: 'GET_REPLIES' });
-        if (res?.replies) setReplies(res.replies);
+        const res = await browser.runtime.sendMessage({ type: 'GET_TASK' });
+        if (res?.task) setTask(res.task);
       } catch {
         /* ignore */
       }
     };
-    fetchReplies();
-    timer = setInterval(fetchReplies, 3000);
+    fetchTask();
+    timer = setInterval(fetchTask, 1500);
     return () => {
       if (timer) clearInterval(timer);
     };
@@ -448,12 +449,15 @@ export default function FloatingPanel({
             </div>
             <div style={styles.resultList}>
               {selectedList.map((ai) => {
-                const reply = replies[ai.name];
+                const result = task?.results?.[ai.id];
+                const reply = result?.answer || '';
+                const status = result?.status;
                 return (
                   <div key={ai.id} style={styles.resultItem}>
                     <div style={styles.resultName}>
                       <span style={styles.aiIcon}><AiIcon ai={ai} /></span>
                       {ai.name}
+                      <StatusBadge status={status} />
                       <a
                         href={buildUrl(ai)}
                         onClick={(e) => {
@@ -469,7 +473,7 @@ export default function FloatingPanel({
                       <div style={styles.resultText}>{reply}</div>
                     ) : (
                       <div style={styles.resultStatus}>
-                        未能获取回复，点击上方「查看原文」前往平台
+                        {statusText(status)}
                       </div>
                     )}
                   </div>
@@ -641,6 +645,55 @@ function brandColor(name: string): string {
   if (l.includes('gemini')) return '#4285F4';
   if (l.includes('kimi')) return '#333333';
   return '#6b7280';
+}
+
+/** 状态文案 */
+function statusText(status?: AiStatus): string {
+  switch (status) {
+    case 'opening':
+      return '正在打开页面…';
+    case 'sending':
+      return '正在发送…';
+    case 'streaming':
+      return '正在生成回答…';
+    case 'error':
+      return '发送失败，点击上方「查看原文」前往平台';
+    default:
+      return '未能获取回复，点击上方「查看原文」前往平台';
+  }
+}
+
+/** 状态徽标（完成/失败显示，其余状态用文字） */
+function StatusBadge({ status }: { status?: AiStatus }) {
+  if (status === 'done') {
+    return (
+      <span
+        style={{
+          fontSize: 11,
+          color: 'hsl(158 64% 40%)',
+          fontWeight: 600,
+          flexShrink: 0,
+        }}
+      >
+        完成
+      </span>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <span
+        style={{
+          fontSize: 11,
+          color: 'hsl(0 72% 51%)',
+          fontWeight: 600,
+          flexShrink: 0,
+        }}
+      >
+        失败
+      </span>
+    );
+  }
+  return null;
 }
 
 const panelCss = `

@@ -10,6 +10,11 @@ export interface HistoryItem {
    * 会由 background 通过 updateHistoryUrl 回写覆盖。
    */
   aiUrls: { id?: string; name: string; url: string }[];
+  /**
+   * 会话分组标识：同一会话的多轮追问共享同一 conversationId，
+   * 用于历史记录按「会话 → 轮次」两级展示。
+   */
+  conversationId?: string;
 }
 
 const HISTORY_KEY = 'local:history';
@@ -23,6 +28,7 @@ export async function addHistory(
   question: string,
   aiNames: string[],
   aiUrls: { name: string; url: string }[] = [],
+  conversationId?: string,
 ): Promise<HistoryItem> {
   const history = await getHistory();
   const newItem: HistoryItem = {
@@ -31,6 +37,7 @@ export async function addHistory(
     timestamp: Date.now(),
     aiNames,
     aiUrls,
+    conversationId,
   };
   history.unshift(newItem);
   if (history.length > MAX_ITEMS) history.length = MAX_ITEMS;

@@ -2,6 +2,8 @@ import { DEFAULT_AI_CONFIGS, mergeConfigs } from '@/utils/aiConfig';
 import type { AiConfig } from '@/utils/aiConfig';
 import { autoFillAndSend } from '@/utils/autoSend';
 import { addHistory, updateHistoryUrl } from '@/utils/history';
+import { genId } from '@/utils/task';
+import type { AskTask, AiResult } from '@/utils/task';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 const OPEN_MODE_KEY = 'local:openMode';
@@ -42,6 +44,26 @@ export default defineBackground(() => {
     }
   });
 
+  // 任务级结果缓存：taskId -> AskTask。以「任务 × AI」为维度，避免多轮互相覆盖。
+  const tasks = new Map<string, AskTask>();
+  let currentTaskId: string | undefined;
+  // 会话标识：多轮追问共享同一 conversationId（用于历史分组 + 复用已打开 Tab）
+  let currentConversationId: string | undefined;
+
+  /** 更新当前任务中某个 AI 的结果 */
+  function updateResult(
+    taskId: string | undefined,
+    aiId: string | undefined,
+    patch: Partial<AiResult>,
+  ) {
+    if (!taskId) return;
+    const task = tasks.get(taskId);
+    if (!task || !aiId) return;
+    const cur = task.results[aiId];
+    if (!cur) return;
+    task.results[aiId] = { ...cur, ...patch };
+  }
+
   // 监听内容脚本消息（划词浮动面板 + 回答完成 + 打开设置）
   browser.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'ASK_AI' && msg.text) {
@@ -52,18 +74,40 @@ export default defineBackground(() => {
       handleFollowUp(msg.text, msg.aiIds);
       return;
     }
-    if (msg?.type === 'AI_REPLY' && msg.aiName) {
-      // 更新该 AI 的最新回复（供结果面板轮询展示）
-      aiReplies.set(msg.aiName, msg.text ?? '');
+    // 发送中/流式/完成：由 autoSend 经 content script 桥接转发而来
+    if (msg?.type === 'AI_SENDING' && msg.aiId) {
+      updateResult(msg.taskId, msg.aiId, { status: 'sending' });
       return;
     }
-    if (msg?.type === 'GET_REPLIES') {
-      return { replies: Object.fromEntries(aiReplies) };
+    if (msg?.type === 'AI_REPLY' && msg.aiName && msg.aiId) {
+      updateResult(msg.taskId, msg.aiId, {
+        status: 'streaming',
+        answer: msg.text ?? '',
+      });
+      return;
     }
-    if (msg?.type === 'AI_REPLY_DONE' && msg.aiName) {
-      if (msg.text) aiReplies.set(msg.aiName, msg.text);
+    if (msg?.type === 'AI_REPLY_DONE' && msg.aiName && msg.aiId) {
+      updateResult(msg.taskId, msg.aiId, {
+        status: 'done',
+        answer: msg.text ?? '',
+      });
       notifyReplyDone(msg.aiName);
       return;
+    }
+    if (msg?.type === 'GET_TASK') {
+      const task = currentTaskId ? tasks.get(currentTaskId) : undefined;
+      return { task: task ?? null };
+    }
+    // 兼容旧版轮询：返回当前任务各 AI 的回复（按 aiName）
+    if (msg?.type === 'GET_REPLIES') {
+      const task = currentTaskId ? tasks.get(currentTaskId) : undefined;
+      const replies: Record<string, string> = {};
+      if (task) {
+        for (const r of Object.values(task.results)) {
+          replies[r.aiName] = r.answer;
+        }
+      }
+      return { replies };
     }
     if (msg?.type === 'OPEN_SETTINGS') {
       openSettingsPage();
@@ -86,9 +130,6 @@ export default defineBackground(() => {
 
   const NOTIFY_KEY = 'local:notifyOnDone';
 
-  // 各 AI 最新回复缓存（aiName -> 回复文本），供浮动结果面板轮询展示
-  const aiReplies = new Map<string, string>();
-
   /** 回答完成提醒：检查全局开关后弹系统通知 */
   async function notifyReplyDone(aiName: string) {
     try {
@@ -109,8 +150,7 @@ export default defineBackground(() => {
 
   /**
    * 会话 URL 跟踪：记录「AI 标签页 → 历史条目」的映射，
-   * 自动发送成功后页面会跳转到真实会话地址（SPA pushState 或整页跳转），
-   * 监听到同域 URL 变化且稳定后，把该地址回写到历史记录。
+   * 自动发送成功后页面会跳转到真实会话地址，监听到同域 URL 变化且稳定后回写。
    */
   interface TabTrack {
     historyId: string;
@@ -118,7 +158,6 @@ export default defineBackground(() => {
     aiName: string;
     initialUrl: string;
     lastUrl?: string;
-    /** 是否已捕获会话 URL（只记录发送后的第一次同域跳转，避免用户后续手动导航覆盖历史） */
     captured?: boolean;
     timer?: ReturnType<typeof setTimeout>;
   }
@@ -180,15 +219,19 @@ export default defineBackground(() => {
     tabTrack.delete(tabId);
   });
 
-  async function handleAsk(text: string, aiIds?: string[]) {
-    // 合并最新默认配置，确保内置平台使用最新的选择器（存储可能是旧数据）
+  async function loadContext() {
     const aiConfigs = mergeConfigs(
       (await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null,
     );
     const openMode =
       ((await storage.getItem(OPEN_MODE_KEY)) as 'tabs' | 'windows' | null) ??
       'tabs';
+    return { aiConfigs, openMode };
+  }
 
+  /** 一次性提问：新建一个任务（新会话），并行打开/复用各 AI 标签页并发送 */
+  async function handleAsk(text: string, aiIds?: string[]) {
+    const { aiConfigs, openMode } = await loadContext();
     const enabledList = aiConfigs.filter((ai) => {
       if (!ai.enabled || !ai.url) return false;
       if (Array.isArray(aiIds) && aiIds.length > 0) {
@@ -201,6 +244,28 @@ export default defineBackground(() => {
     const question = text.trim();
     if (!question) return;
 
+    // 新建任务 + 新会话
+    const taskId = genId();
+    const conversationId = genId();
+    currentConversationId = conversationId;
+    const task: AskTask = {
+      id: taskId,
+      question,
+      createdAt: Date.now(),
+      conversationId,
+      results: {},
+    };
+    enabledList.forEach((ai) => {
+      task.results[ai.id] = {
+        aiId: ai.id,
+        aiName: ai.name,
+        status: 'opening',
+        answer: '',
+      };
+    });
+    tasks.set(taskId, task);
+    currentTaskId = taskId;
+
     // 记录历史（含实际打开的 URL）
     const aiUrls = enabledList.map((ai) => ({
       id: ai.id,
@@ -211,15 +276,24 @@ export default defineBackground(() => {
       question,
       enabledList.map((ai) => ai.name),
       aiUrls,
+      conversationId,
     );
 
     let winIndex = 0;
     for (const ai of enabledList) {
-      // 需要自动发送的平台：优先复用已打开的「原有」聊天窗口，直接输入内容并自动发送，避免重复新建
+      // 需要自动发送的平台：优先复用已打开的「原有」聊天窗口
       if (ai.autoSend && ai.selectors) {
         const existing = await findExistingChatTab(ai);
         if (existing) {
-          injectAutoSend(existing.tabId, question, ai.selectors, ai.name);
+          trackTab(existing.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
+          injectAutoSend(
+            existing.tabId,
+            question,
+            ai.selectors,
+            ai.name,
+            taskId,
+            ai.id,
+          );
           continue;
         }
       }
@@ -229,7 +303,7 @@ export default defineBackground(() => {
       const open = (tabId: number) => {
         trackTab(tabId, historyItem.id, ai.id, ai.name, url);
         if (ai.autoSend && ai.selectors) {
-          injectAutoSend(tabId, question, ai.selectors, ai.name);
+          injectAutoSend(tabId, question, ai.selectors, ai.name, taskId, ai.id);
         }
       };
       if (openMode === 'windows') {
@@ -257,6 +331,79 @@ export default defineBackground(() => {
     }
   }
 
+  /**
+   * 追问：延续当前会话（复用 conversationId 与已打开的聊天窗口），
+   * 生成新任务（新 taskId）以区分不同轮次的结果，避免互相覆盖。
+   */
+  async function handleFollowUp(text: string, aiIds?: string[]) {
+    const { aiConfigs } = await loadContext();
+    const question = text.trim();
+    if (!question) return;
+
+    const targets = aiConfigs.filter((ai) => {
+      if (!ai.enabled || !ai.url) return false;
+      if (Array.isArray(aiIds) && aiIds.length > 0) {
+        return aiIds.includes(ai.id);
+      }
+      return true;
+    });
+    if (targets.length === 0) return;
+
+    // 延续上一个会话；若没有（如后台重启后），则作为新会话发起
+    const conversationId = currentConversationId ?? genId();
+    currentConversationId = conversationId;
+
+    const taskId = genId();
+    const task: AskTask = {
+      id: taskId,
+      question,
+      createdAt: Date.now(),
+      conversationId,
+      results: {},
+    };
+    targets.forEach((ai) => {
+      task.results[ai.id] = {
+        aiId: ai.id,
+        aiName: ai.name,
+        status: 'opening',
+        answer: '',
+      };
+    });
+    tasks.set(taskId, task);
+    currentTaskId = taskId;
+
+    // 追问同样写入历史，并共享同一 conversationId（用于历史分组）
+    const aiUrls = targets.map((ai) => ({
+      id: ai.id,
+      name: ai.name,
+      url: buildUrl(ai, question),
+    }));
+    const historyItem = await addHistory(
+      question,
+      targets.map((ai) => ai.name),
+      aiUrls,
+      conversationId,
+    );
+
+    // 优先复用已打开的「原有」聊天窗口
+    const reused = new Set<string>();
+    for (const ai of targets) {
+      if (!ai.autoSend || !ai.selectors || reused.has(ai.id)) continue;
+      const existing = await findExistingChatTab(ai);
+      if (existing) {
+        reused.add(ai.id);
+        trackTab(existing.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
+        injectAutoSend(existing.tabId, question, ai.selectors, ai.name, taskId, ai.id);
+      }
+    }
+
+    // 没有可复用窗口的平台，回退到新建流程
+    const missed = targets.filter((ai) => !reused.has(ai.id));
+    if (missed.length > 0) {
+      await handleAsk(question, missed.map((ai) => ai.id));
+    }
+  }
+
   function buildUrl(ai: AiConfig, text: string): string {
     if (ai.url.includes('{query}')) {
       return ai.url.replace(/\{query\}/g, encodeURIComponent(text));
@@ -266,7 +413,6 @@ export default defineBackground(() => {
 
   /**
    * 查找某个 AI 已打开的聊天标签页（跨后台会话也能命中）。
-   * 匹配依据是该 AI 配置 URL 的源（origin），返回已加载完成的标签页。
    */
   async function findExistingChatTab(
     ai: AiConfig,
@@ -286,7 +432,6 @@ export default defineBackground(() => {
 
   function getOrigin(url: string): string | null {
     try {
-      // 去除可能存在的 {query} 占位符后再解析源
       return new URL(url.replace(/\{query\}/g, '')).origin;
     } catch {
       return null;
@@ -295,7 +440,7 @@ export default defineBackground(() => {
 
   /**
    * 查看原文：优先切换到该 AI 已打开的聊天标签页（按 origin 匹配），
-   * 找不到才新建标签页。避免每次「查看原文」都新开一个窗口。
+   * 找不到才新建标签页。
    */
   async function openAiTab(url: string) {
     try {
@@ -317,77 +462,25 @@ export default defineBackground(() => {
     }
   }
 
-  /**
-   * 追问：把新问题直接注入到已打开的 AI 聊天标签页/窗口，避免重复新建。
-   * 若对应 AI 没有已打开的窗口，则回退到默认的新建流程。
-   */
-  async function handleFollowUp(text: string, aiIds?: string[]) {
-    const aiConfigs = mergeConfigs(
-      (await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null,
-    );
-    const question = text.trim();
-    if (!question) return;
-
-    const targets = aiConfigs.filter((ai) => {
-      if (!ai.enabled || !ai.url) return false;
-      if (Array.isArray(aiIds) && aiIds.length > 0) {
-        return aiIds.includes(ai.id);
-      }
-      return true;
-    });
-    if (targets.length === 0) return;
-
-    // 优先复用已打开的「原有」聊天窗口（通过 tabs.query 跨后台会话也能命中），
-    // 直接输入问题并自动发送，避免重新新建标签页/窗口。
-    const reused = new Set<string>();
-    for (const ai of targets) {
-      if (!ai.autoSend || !ai.selectors || reused.has(ai.id)) continue;
-      const existing = await findExistingChatTab(ai);
-      if (existing) {
-        reused.add(ai.id);
-        injectAutoSend(existing.tabId, question, ai.selectors, ai.name);
-      }
-    }
-
-    // 没有可复用窗口的平台，回退到新建流程
-    const missed = targets.filter((ai) => !reused.has(ai.id));
-    if (missed.length > 0) {
-      await handleAsk(question, missed.map((ai) => ai.id));
-    }
-  }
-
-
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   /**
-   * 等待标签页完成加载。
-   * tabs.create 回调触发时页面往往还在 loading，此时 executeScript 注入会失败，
-   * 必须先等 tab.status === 'complete' 再注入。
+   * 注入自动发送脚本。不再阻塞等待 tab.status === complete——
+   * 页面只要加载到可注入的程度就立即注入，autoFillAndSend 内部会通过
+   * MutationObserver 等待输入框出现。注入失败（页面尚未就绪）时快速重试。
+   * 各标签页互不等待，实现真正并发发送。
    */
-  async function waitForTabComplete(tabId: number, timeoutMs = 20000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      try {
-        const tab = await browser.tabs.get(tabId);
-        if (tab.status === 'complete') return;
-      } catch {
-        return; // 标签页已被关闭，放弃等待
-      }
-      await sleep(300);
-    }
-  }
-
   async function injectAutoSend(
     tabId: number,
     text: string,
     selectors: AiConfig['selectors'],
     aiName: string,
+    taskId: string,
+    aiId: string,
   ) {
     if (!selectors) return;
-    // 等页面加载完成，避免注入时机过早导致失败（豆包等重页面尤其明显）
-    await waitForTabComplete(tabId);
-    // executeScript 注入重试：页面加载状态存在竞争，首次可能失败
-    for (let attempt = 0; attempt < 5; attempt++) {
+    const deadline = Date.now() + 20000;
+    for (let attempt = 0; attempt < 80; attempt++) {
       try {
         await browser.scripting.executeScript({
           target: { tabId },
@@ -395,12 +488,20 @@ export default defineBackground(() => {
           // 只在 MAIN world 下响应合成事件，ISOLATED world 派发的 input/click 不生效
           world: 'MAIN',
           func: autoFillAndSend,
-          args: [text, selectors, aiName],
+          args: [text, selectors, aiName, taskId, aiId],
         });
         return;
       } catch (e) {
-        console.warn(`[multi-ai-ask] 注入失败（第 ${attempt + 1} 次）:`, e);
-        if (attempt < 4) await sleep(1000);
+        // 页面尚未就绪（executeScript 会抛错），快速重试
+        if (Date.now() > deadline) {
+          console.warn(`[multi-ai-ask] 注入超时（${aiName}）:`, e);
+          updateResult(taskId, aiId, {
+            status: 'error',
+            error: '注入超时，未能自动发送',
+          });
+          return;
+        }
+        await sleep(250);
       }
     }
   }
