@@ -5,7 +5,6 @@ import type { AiConfig } from '@/utils/aiConfig';
 import type { AskTask, AiStatus } from '@/utils/task';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
-const DEFAULT_PANEL_KEY = 'local:defaultFloatingPanel';
 const AUTO_SEND_KEY = 'local:autoSend';
 
 interface FloatingPanelProps {
@@ -148,8 +147,7 @@ export default function FloatingPanel({
     storage.getItem(AUTO_SEND_KEY).then((v) => {
       const val = typeof v === 'boolean' ? v : false;
       setAutoSend(val);
-      // 视图由自动发送开关决定：开启→直接进结果面板；关闭→显示选择面板。
-      // 避免关闭自动发送后，仍被之前写入的 defaultFloatingPanel='result' 直接带到结果面板。
+      // 视图由自动发送开关决定：开启→直接进结果面板；关闭→显示选择面板
       setView(val ? 'result' : 'select');
     });
   }, []);
@@ -166,7 +164,6 @@ export default function FloatingPanel({
       aiIds: enabled.map((ai) => ai.id),
     });
     setView('result');
-    storage.setItem(DEFAULT_PANEL_KEY, 'result');
   }, [autoSend, aiConfigs]);
 
   // 结果面板轮询拉取当前任务各 AI 的回复（含流式状态）
@@ -194,7 +191,6 @@ export default function FloatingPanel({
     // 关闭自动发送时回到选择面板，避免停留在结果面板
     if (!checked) {
       setView('select');
-      storage.setItem(DEFAULT_PANEL_KEY, 'select');
     }
   };
 
@@ -225,7 +221,6 @@ export default function FloatingPanel({
 
     if (showAfterSend) {
       setView('result');
-      storage.setItem(DEFAULT_PANEL_KEY, 'result');
     } else {
       onClose();
     }
