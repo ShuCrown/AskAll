@@ -391,6 +391,9 @@ export default defineBackground(() => {
       try {
         await browser.scripting.executeScript({
           target: { tabId },
+          // 在 MAIN world 运行：部分 AI 站点（豆包/DeepSeek）的 React 事件
+          // 只在 MAIN world 下响应合成事件，ISOLATED world 派发的 input/click 不生效
+          world: 'MAIN',
           func: autoFillAndSend,
           args: [text, selectors, aiName],
         });

@@ -31,28 +31,45 @@ export async function autoFillAndSend(
   const editorContainsText = (el: HTMLElement, target: string): boolean =>
     (el.textContent || '').includes(target);
 
-  // 等待输入框出现（最多 60 次 x 500ms ≈ 30s）
-  let input: HTMLElement | null = null;
-  for (let i = 0; i < 60; i++) {
-    const candidates: string[] = selectors.inputCandidates || [
-      selectors.input,
-    ];
-    for (const sel of candidates) {
-      const el = document.querySelector<HTMLElement>(sel);
-      // 确保元素可见且可编辑
-      if (
-        el &&
-        el.offsetParent !== null &&
-        (el.tagName === 'TEXTAREA' ||
-          el.tagName === 'INPUT' ||
-          el.isContentEditable)
-      ) {
-        input = el;
-        break;
+  // 向后台发送消息。MAIN world 下页面没有 chrome 全局，静默跳过回执通知。
+  const sendToBackground = (msg: {
+    type: string;
+    aiName?: string;
+    text?: string;
+  }) => {
+    try {
+      if (typeof chrome !== 'undefined' && chrome?.runtime?.sendMessage) {
+        chrome.runtime.sendMessage(msg);
       }
+    } catch {
+      /* 页面关闭等场景下忽略 */
     }
-    if (input) break;
-    await wait(500);
+  };
+
+  // 等待输入框出现（最多 60 次 x 500ms ≈ 30s）。
+  // 用 querySelectorAll 遍历同选择器的所有节点，选「可见且可编辑」的那一个：
+  // 避免页面存在多个 textarea 时 querySelector 命中隐藏输入框，导致文字填错元素、发送无反应。
+  let input: HTMLElement | null = null;
+  const inputCandidates: string[] = selectors.inputCandidates || [
+    selectors.input,
+  ];
+  for (let i = 0; i < 60 && !input; i++) {
+    for (const sel of inputCandidates) {
+      const nodes = document.querySelectorAll<HTMLElement>(sel);
+      for (const el of nodes) {
+        if (
+          el.offsetParent !== null &&
+          (el.tagName === 'TEXTAREA' ||
+            el.tagName === 'INPUT' ||
+            el.isContentEditable)
+        ) {
+          input = el;
+          break;
+        }
+      }
+      if (input) break;
+    }
+    if (!input) await wait(500);
   }
 
   if (!input) {
@@ -65,7 +82,9 @@ export async function autoFillAndSend(
   await wait(200);
 
   if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
-    // 受控组件：通过原生 setter + input 事件触发框架状态更新
+    // 受控组件：通过原生 setter + InputEvent 触发框架状态更新。
+    // 使用 InputEvent（而非普通 Event）携带 data 和 inputType，
+    // 确保 DeepSeek/豆包 等 React 组件能正确识别输入并启用发送按钮。
     const proto =
       input.tagName === 'TEXTAREA'
         ? HTMLTextAreaElement.prototype
@@ -74,11 +93,23 @@ export async function autoFillAndSend(
     if (setter) setter.call(input, text);
     else (input as HTMLInputElement).value = text;
 
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
+    // beforeinput + input：现代框架（React 17+）优先监听 beforeinput
     input.dispatchEvent(
-      new CompositionEvent('compositionend', { bubbles: true, data: text }),
+      new InputEvent('beforeinput', {
+        bubbles: true,
+        cancelable: true,
+        data: text,
+        inputType: 'insertText',
+      }),
     );
+    input.dispatchEvent(
+      new InputEvent('input', {
+        bubbles: true,
+        data: text,
+        inputType: 'insertText',
+      }),
+    );
+    input.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (input.isContentEditable) {
     // contenteditable。注意：千问/通义 用的是 Slate.js 富文本编辑器，
     // execCommand('insertText') 只改 DOM 不更新 Slate 内部状态，发送按钮会一直 disabled。
@@ -135,73 +166,110 @@ export async function autoFillAndSend(
     }
   }
 
-  // 等待框架处理输入状态
-  await wait(500);
+  // 等待框架处理输入状态（缩短等待，剩余等待交给发送阶段的轮询）
+  await wait(200);
 
-  // 判断按钮是否可用：原生 disabled / aria-disabled / CSS 禁用类
+  // 判断按钮是否可用。
+  // 兼容各平台不同的禁用表达：原生 disabled / aria-disabled / data-disabled /
+  // data-loading（豆包） / CSS 禁用类。
   const isBtnDisabled = (btn: HTMLElement): boolean =>
     (btn as HTMLButtonElement).disabled === true ||
     btn.hasAttribute('disabled') ||
     btn.getAttribute('aria-disabled') === 'true' ||
+    btn.getAttribute('data-disabled') === 'true' ||
+    btn.getAttribute('data-loading') === 'true' ||
     btn.classList.contains('disabled') ||
     btn.classList.contains('is-disabled');
 
-  // 点击发送按钮（对 span/div 补充 mousedown/mouseup，部分 SPA 监听而非 click）
+  // 点击发送按钮：对任意标签派发完整的 pointer + mouse + click 事件序列。
+  // 不同平台/组件库监听的触发事件各不相同：
+  // - React onClick 监听冒泡 click
+  // - 部分自定义 Button（如豆包 data-dbx-name="button"）监听 pointerdown/pointerup
+  // - 部分 SPA 监听 mousedown/mouseup
+  // 统一派发完整序列保证全部命中；带坐标模拟真实点击，避免 detail=0 被忽略。
+  // 注意：不再调用 .click()，避免「已派发 click 事件」+「.click()」导致重复发送。
   const clickBtn = (btn: HTMLElement) => {
-    if (btn.tagName !== 'BUTTON' && btn.tagName !== 'INPUT') {
-      btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    }
-    btn.click();
+    const rect = btn.getBoundingClientRect();
+    const opts: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+      clientX: rect.x + rect.width / 2,
+      clientY: rect.y + rect.height / 2,
+    };
+    btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+    btn.dispatchEvent(new MouseEvent('mousedown', opts));
+    btn.dispatchEvent(new PointerEvent('pointerup', opts));
+    btn.dispatchEvent(new MouseEvent('mouseup', opts));
+    btn.dispatchEvent(new MouseEvent('click', opts));
   };
 
-  // 发送按钮：两阶段点击。
-  // 阶段1）优先等待「平台专属」发送按钮（candidates[0]，最具体）渲染并可用后点击。
-  // 阶段2）专属按钮超时未就绪，才回退到通用候选。
-  // 避免误点通用按钮（如搜索框、工具栏按钮）导致「展开搜索窗口」而非发送。
+  // 发送按钮：优先等待「平台专属」按钮（candidates[0]）出现并可用，点击后用
+  // 「输入框是否被清空」验证是否真正发送成功；失败则快速重试/兜底，
+  // 避免「点一次就放弃、5 秒后才走 Enter 兜底」造成的发送延迟和豆包静默失败。
   let sent = false;
+
+  // 发送成功的信号：输入框被清空（成功发送后框架会清空输入，或重建输入框）
+  const inputCleared = (): boolean => {
+    if (!input || !input.isConnected) return true; // 元素被移除/重渲染 = 已发送
+    const v =
+      input.tagName === 'TEXTAREA' || input.tagName === 'INPUT'
+        ? (input as HTMLInputElement).value
+        : (input.textContent || '');
+    return v.trim().length === 0;
+  };
+
+  // 点击并验证：点击后轮询输入框是否被清空
+  const clickAndVerify = async (btn: HTMLElement, waitMs: number) => {
+    clickBtn(btn);
+    const start = Date.now();
+    while (Date.now() - start < waitMs) {
+      await wait(150);
+      if (inputCleared()) return true;
+    }
+    return false;
+  };
+
   if (selectors.sendButton) {
     const candidates: string[] = selectors.sendButtonCandidates || [
       selectors.sendButton,
     ];
-
-    // 阶段1：只等专属按钮（第一个候选项）
     const specific = candidates[0];
-    if (specific) {
-      for (let attempt = 0; attempt < 30; attempt++) {
-        const btn = document.querySelector<HTMLElement>(specific);
-        if (btn && !isBtnDisabled(btn)) {
-          clickBtn(btn);
-          sent = true;
-          break;
-        }
-        await wait(200);
+
+    // 阶段1：等专属按钮（最具体）可用后点击并验证，最多约 3s
+    for (let attempt = 0; attempt < 20 && !sent; attempt++) {
+      const btn = specific
+        ? document.querySelector<HTMLElement>(specific)
+        : null;
+      if (btn && !isBtnDisabled(btn)) {
+        sent = await clickAndVerify(btn, 2500);
+      }
+      if (!sent) await wait(150);
+    }
+
+    // 阶段2：专属按钮点击后输入未被清空，再尝试一次（首次点击可能被框架忽略）
+    if (!sent && specific) {
+      const btn = document.querySelector<HTMLElement>(specific);
+      if (btn && !isBtnDisabled(btn)) {
+        sent = await clickAndVerify(btn, 2000);
       }
     }
 
-    // 阶段2：专属按钮未就绪，等更久后回退到通用候选（跳过第 0 个，避免重复）
-    if (!sent && candidates.length > 1) {
-      for (let attempt = 0; attempt < 25; attempt++) {
-        let clicked = false;
-        for (let c = 1; c < candidates.length; c++) {
-          const sel = candidates[c];
-          if (!sel) continue;
-          const btn = document.querySelector<HTMLElement>(sel);
-          if (btn && !isBtnDisabled(btn)) {
-            clickBtn(btn);
-            clicked = true;
-            sent = true;
-            break;
-          }
-        }
-        if (clicked) break;
-        await wait(200);
+    // 阶段3：仍未成功，遍历其余「安全」候选（均为带 id/aria-label/class 的选择器，
+    // 不含 div[role="button"] 等宽泛选择器，避免误点搜索/工具栏按钮）
+    for (let c = 1; c < candidates.length && !sent; c++) {
+      const sel = candidates[c];
+      if (!sel) continue;
+      const btn = document.querySelector<HTMLElement>(sel);
+      if (btn && !isBtnDisabled(btn)) {
+        sent = await clickAndVerify(btn, 2000);
       }
     }
   }
 
-  // 点击失败则模拟回车
-  if (!sent) {
+  // 兜底：模拟回车（textarea/input 平台，如 DeepSeek/文心 Enter 可直接发送），
+  // 并轮询验证以尽量缩短发送延迟
+  if (!sent && input) {
     input.focus();
     await wait(100);
     const keyboardEventInit: KeyboardEventInit = {
@@ -215,6 +283,11 @@ export async function autoFillAndSend(
     input.dispatchEvent(new KeyboardEvent('keydown', keyboardEventInit));
     input.dispatchEvent(new KeyboardEvent('keypress', keyboardEventInit));
     input.dispatchEvent(new KeyboardEvent('keyup', keyboardEventInit));
+    const start = Date.now();
+    while (Date.now() - start < 2500) {
+      await wait(200);
+      if (inputCleared()) break;
+    }
   }
 
   // 发送已触发，启动「回答完成检测」：轮询回复块文本，稳定后通知后台弹提醒。
@@ -260,30 +333,22 @@ export async function autoFillAndSend(
           stableCount++;
           if (stableCount >= STABLE_THRESHOLD) {
             console.log(`✅ [multi-ai-ask] ${name} 回答完成`);
-            try {
-              chrome.runtime.sendMessage({
-                type: 'AI_REPLY_DONE',
-                aiName: name,
-                text: text.slice(0, 4000), // 限制长度避免消息过大
-              });
-            } catch {
-              /* 消息发送失败忽略（页面关闭等场景） */
-            }
+            sendToBackground({
+              type: 'AI_REPLY_DONE',
+              aiName: name,
+              text: text.slice(0, 4000), // 限制长度避免消息过大
+            });
             return;
           }
         } else {
           stableCount = 0;
           lastText = text;
           // 流式输出过程中持续同步最新回复文本到后台
-          try {
-            chrome.runtime.sendMessage({
-              type: 'AI_REPLY',
-              aiName: name,
-              text: text.slice(0, 4000),
-            });
-          } catch {
-            /* ignore */
-          }
+          sendToBackground({
+            type: 'AI_REPLY',
+            aiName: name,
+            text: text.slice(0, 4000),
+          });
         }
       } else {
         // 回复尚未开始（或思考中/发送失败），重置基线

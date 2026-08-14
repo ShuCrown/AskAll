@@ -64,13 +64,13 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
       input: 'textarea',
       inputCandidates: ['textarea', 'div[contenteditable="true"]'],
       sendButton: 'div[role="button"][aria-label*="发送"]',
+      // 仅保留带 aria-label/id 的安全选择器；
+      // 移除 div[role="button"]、button:has(svg)、div.ds-chat-footer div[role="button"]
+      // 等宽泛选择器——它们会匹配到「联网搜索」等工具栏按钮导致误点击
       sendButtonCandidates: [
         'div[role="button"][aria-label*="发送"]',
         'div[role="button"][aria-label*="Send"]',
-        'div.ds-chat-footer div[role="button"]',
-        'button[type="submit"]',
-        'button:has(svg)',
-        'div[role="button"]',
+        'div[role="button"][aria-label*="send"]',
         'button[aria-label*="发送"]',
         'button[aria-label*="Send"]',
       ],
@@ -99,13 +99,13 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
         'div[role="textbox"]',
       ],
       sendButton: '#flow-end-msg-send',
+      // 移除 div[role="button"]、button:has(svg) 等宽泛选择器，避免误点击工具栏
       sendButtonCandidates: [
         '#flow-end-msg-send',
         'button[id*="send"]',
         'button[class*="send"]',
-        'button[type="submit"]',
-        'div[role="button"]',
-        'button:has(svg)',
+        'button[aria-label*="发送"]',
+        'button[aria-label*="Send"]',
       ],
       replyCandidates: [
         '[class*="markdown"]',
@@ -140,10 +140,7 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
         '#ci-submit-button-ai',
         'span.ci-submit-button',
         'span[class*="submit-button"]',
-        'button[type="submit"]',
         'button[class*="send"]',
-        'div[role="button"]',
-        'button:has(svg)',
       ],
       replyCandidates: [
         '[class*="markdown"]',
@@ -172,10 +169,8 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
       sendButtonCandidates: [
         'button[aria-label="发送消息"]',
         'button[aria-label*="发送"]',
-        'button[type="submit"]',
+        'button[aria-label*="Send"]',
         'button[class*="send"]',
-        'div[role="button"]',
-        'button:has(svg)',
       ],
       replyCandidates: [
         '[class*="markdown"]',
