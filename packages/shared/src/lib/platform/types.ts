@@ -69,8 +69,12 @@ export interface PlatformAsk {
   followUp(text: string, aiIds?: string[]): Promise<void>;
   /** 获取当前任务（含各 AI 结果）。 */
   getTask(): Promise<{ task: AskTask | null }>;
-  /** 打开/切换到某 AI 聊天标签页/窗口。 */
-  openAiTab(url: string): Promise<void>;
+  /**
+   * 打开/切换到某 AI 聊天标签页/窗口。
+   * 携带 `aiId` 时优先复用该 AI 已有的聊天窗口（桌面端 `ai-{aiId}` 子窗口，
+   * 保留当前聊天状态），找不到才以 `url` 新开；`name` 用作新建窗口标题。
+   */
+  openAiTab(url: string, aiId?: string, name?: string): Promise<void>;
   /** 订阅各 AI 回复进度。返回取消订阅函数。 */
   onReply(handler: (msg: ReplyMessage) => void): () => void;
 }

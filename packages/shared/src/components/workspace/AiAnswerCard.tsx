@@ -47,7 +47,10 @@ export default function AiAnswerCard({
 
   const openSource = () => {
     if (!url) return;
-    getPlatform().ask.openAiTab(url).catch(() => {});
+    // 携带 aiId/name：桌面端复用该 AI 的 ai-{aiId} 子窗口（保留当前聊天状态）
+    getPlatform()
+      .ask.openAiTab(url, aiId, name)
+      .catch(() => {});
   };
 
   const copy = async () => {

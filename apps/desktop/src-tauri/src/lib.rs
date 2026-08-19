@@ -5,14 +5,17 @@
 //!   - ask_ai_followup(text, configs, mode) 追问（复用已打开的 AI 子窗口）
 //!   - get_task() -> AskTask | null         当前任务
 //!   - open_ai_webview(url)                 手动打开 AI 站点（内嵌子窗口）
+//!   - show_ai_chat(aiId, url, name)        展示/复用 AI 问答页子窗口（chat tabs 入口）
 //!   - open_settings_window()               打开/聚焦独立设置窗口（#settings 路由）
 //!   - emit_ai_reply(type, aiId, aiName, taskId, text)  子窗口回传回复（IPC）
 //!
 //! 「ask 编排器」：
 //!   - mode = "browser"  → opener 在系统浏览器打开（无法自动发送，回传提示）
-//!   - mode = "embedded" → 创建/复用子 WebviewWindow，注入 auto_send::build_payload
-//!     产出的 JS（自动填充+发送+回复轮询），JS 通过 __TAURI_INTERNALS__.invoke
-//!     回调 emit_ai_reply，再由本端 emit('ai-reply', payload) 推给主窗口。
+//!   - mode = "embedded" → 创建/复用子 WebviewWindow（默认隐藏，不弹窗不抢焦点），
+//!     注入 auto_send::build_payload 产出的 JS（自动填充+发送+回复轮询），
+//!     JS 通过 __TAURI_INTERNALS__.invoke 回调 emit_ai_reply，再由本端
+//!     emit('ai-reply', payload) 推给主窗口；回答内容统一在主窗口问答面板展示，
+//!     需要查看 AI 原始问答页时经 show_ai_chat 唤起对应子窗口（弹窗显示）。
 
 mod auto_send;
 mod os_ask;
@@ -104,15 +107,21 @@ fn gen_id() -> String {
 
 /// 创建或复用 AI 子窗口。
 /// `navigate=true` 表示新会话，跳转到配置 URL；`false` 表示追问，保持当前页面。
+/// `show=false` 表示后台模式：新窗口隐藏创建、已存在窗口不抢焦点——
+/// 提问默认不再弹窗，回答内容统一回流主窗口问答面板，由 `show_ai_chat` 按需唤起。
 fn get_or_create_ai_window(
     app: &tauri::AppHandle,
     label: &str,
     title: &str,
     url: &str,
     navigate: bool,
+    show: bool,
 ) -> Result<tauri::WebviewWindow, String> {
     if let Some(w) = app.get_webview_window(label) {
-        let _ = w.set_focus();
+        if show {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
         if navigate {
             let js = format!("window.location.replace({:?})", url);
             let _ = w.eval(&js);
@@ -126,6 +135,7 @@ fn get_or_create_ai_window(
         .title(title)
         .inner_size(520.0, 720.0)
         .min_inner_size(360.0, 480.0)
+        .visible(show)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(win)
@@ -156,24 +166,25 @@ async fn run_one_ai(
         return;
     }
 
-    // embedded：创建/复用子窗口。追问时复用且不导航。
+    // embedded：创建/复用子窗口（后台模式，不弹窗）。追问时复用且不导航。
     let label = format!("ai-{}", cfg.id);
-    let webview = match get_or_create_ai_window(&app, &label, &cfg.name, &cfg.url, !follow_up) {
-        Ok(w) => w,
-        Err(e) => {
-            let _ = app.emit(
-                "ai-reply",
-                ReplyPayload {
-                    kind: "AI_REPLY_DONE".into(),
-                    ai_id: cfg.id.clone(),
-                    ai_name: cfg.name.clone(),
-                    task_id,
-                    text: Some(format!("打开内嵌窗口失败：{e}")),
-                },
-            );
-            return;
-        }
-    };
+    let webview =
+        match get_or_create_ai_window(&app, &label, &cfg.name, &cfg.url, !follow_up, false) {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = app.emit(
+                    "ai-reply",
+                    ReplyPayload {
+                        kind: "AI_REPLY_DONE".into(),
+                        ai_id: cfg.id.clone(),
+                        ai_name: cfg.name.clone(),
+                        task_id,
+                        text: Some(format!("打开内嵌窗口失败：{e}")),
+                    },
+                );
+                return;
+            }
+        };
 
     let _ = app.emit(
         "ai-reply",
@@ -302,6 +313,26 @@ async fn open_ai_webview(app: tauri::AppHandle, url: String) -> Result<(), Strin
     Ok(())
 }
 
+/// 展示某个 AI 的问答页窗口（顶部 chat tabs / 回答卡片「打开源会话」入口）。
+/// 复用提问时创建的隐藏 `ai-{aiId}` 子窗口（保留当前聊天状态），
+/// 不存在（如重启后回看历史会话）则以该会话 URL 新建可见窗口。
+#[tauri::command]
+async fn show_ai_chat(
+    app: tauri::AppHandle,
+    ai_id: String,
+    url: String,
+    name: Option<String>,
+) -> Result<(), String> {
+    let label = format!("ai-{}", ai_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let title = name.unwrap_or_else(|| "AskAll AI".into());
+    get_or_create_ai_window(&app, &label, &title, &url, true, true).map(|_| ())
+}
+
 /// 子窗口通过 __TAURI_INTERNALS__.invoke 回传回复；本命令转发为主窗口事件。
 #[tauri::command]
 async fn emit_ai_reply(
@@ -376,6 +407,7 @@ pub fn run() {
             ask_ai_followup,
             get_task,
             open_ai_webview,
+            show_ai_chat,
             open_settings_window,
             emit_ai_reply,
             os_ask::request_accessibility_permission,

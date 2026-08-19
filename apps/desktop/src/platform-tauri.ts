@@ -14,6 +14,7 @@
  *   ask_ai_followup(text: String, ai_ids: Vec<String>, mode: String)
  *   get_task() -> AskTask | null
  *   open_ai_webview(url: String, label?: String)
+ *   show_ai_chat(ai_id: String, url: String, name?: String)
  *   事件 'ai-reply'，payload 为 ReplyMessage
  */
 import {
@@ -149,8 +150,14 @@ export const tauriPlatform: PlatformApi = {
     },
     // 双模式 openAiSite：内嵌 = Rust 创建/聚焦子 webview 窗口；浏览器 = 系统默认打开。
     // 用户在设置中切换「内嵌/浏览器」即实时生效（readOpenMode 每次读取最新值）。
-    openAiTab: async (url) => {
+    // 携带 aiId 时走 show_ai_chat：复用提问时创建的 ai-{aiId} 隐藏子窗口
+    // （保留该 AI 的当前聊天状态），实现顶部 chat tabs 的「弹窗显示」切换。
+    openAiTab: async (url, aiId, name) => {
       const mode = readOpenMode();
+      if (aiId && mode !== 'browser') {
+        await invoke('show_ai_chat', { aiId, url, name });
+        return;
+      }
       if (mode === 'browser') {
         await openUrl(url);
       } else {

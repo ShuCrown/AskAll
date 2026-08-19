@@ -26,9 +26,12 @@ function isTruncated(text: string): boolean {
 }
 
 function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
-  const openSource = (url?: string) => {
-    if (!url) return;
-    getPlatform().ask.openAiTab(url).catch(() => {});
+  const openSource = (link?: { id?: string; name: string; url: string }) => {
+    if (!link?.url) return;
+    // 携带 id/name：桌面端复用该 AI 的 ai-{id} 子窗口（保留当前聊天状态）
+    getPlatform()
+      .ask.openAiTab(link.url, link.id, link.name)
+      .catch(() => {});
   };
 
   const [copied, setCopied] = useState(false);
@@ -127,7 +130,7 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
             <button
               key={`${link.name}-${i}`}
               type="button"
-              onClick={() => openSource(link.url)}
+              onClick={() => openSource(link)}
               className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-1 text-xs text-secondary-foreground transition-colors hover:bg-accent"
             >
               <ExternalLink className="h-3 w-3" />
