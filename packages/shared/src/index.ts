@@ -6,6 +6,13 @@
  */
 export * from './utils';
 export * from './components';
+export {
+  useAskStore,
+  selectConversations,
+  buildTurns,
+  isTaskFinished,
+} from './store/askStore';
+export type { AskStoreState, TurnView } from './store/askStore';
 export { getPlatform, setPlatform, hasPlatform } from './lib/platform';
 export type {
   PlatformApi,

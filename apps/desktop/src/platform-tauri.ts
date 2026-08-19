@@ -115,16 +115,18 @@ export const tauriPlatform: PlatformApi = {
       }
     },
     openSettings: async () => {
-      // 桌面端「设置」即共享 App 的「AI 配置」Tab：聚焦窗口并派发导航事件，
-      // 由 App 监听切换；即便无人监听也至少把窗口拉到前台。
+      // v1.1：设置独立窗口。调用 Rust 命令创建/聚焦 label=settings 的窗口
+      // （加载同一份 SPA 的 #settings 路由渲染 SettingsApp）。
       try {
-        await getCurrentWindow().setFocus();
-      } catch {
-        /* 忽略 */
+        await invoke('open_settings_window');
+      } catch (e) {
+        console.warn('[askall-tauri] 打开设置窗口失败:', e);
+        try {
+          await getCurrentWindow().setFocus();
+        } catch {
+          /* 忽略 */
+        }
       }
-      window.dispatchEvent(
-        new CustomEvent('askall-navigate', { detail: { tab: 'config' } }),
-      );
     },
   },
 
@@ -188,4 +190,16 @@ export async function initTauriPlatform(): Promise<void> {
     /* 取不到版本时保留默认值，不阻断启动 */
   }
   setPlatform(tauriPlatform);
+
+  // 桥接 Rust 端 OS 级「划词提问」事件（全局快捷键 / macOS 右键菜单）到 window 事件，
+  // 供共享 App.tsx 监听后切到「提问」Tab 并预填问题。扩展端无此事件，监听无副作用。
+  listen<{ text: string; source: string }>('askall-external-ask', (e) => {
+    window.dispatchEvent(
+      new CustomEvent('askall-external-ask', {
+        detail: { text: e.payload.text, source: e.payload.source },
+      }),
+    );
+  }).catch((err) => {
+    console.warn('[askall-tauri] 订阅 askall-external-ask 失败:', err);
+  });
 }

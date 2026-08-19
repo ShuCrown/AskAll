@@ -5,6 +5,7 @@
 //!   - ask_ai_followup(text, configs, mode) 追问（复用已打开的 AI 子窗口）
 //!   - get_task() -> AskTask | null         当前任务
 //!   - open_ai_webview(url)                 手动打开 AI 站点（内嵌子窗口）
+//!   - open_settings_window()               打开/聚焦独立设置窗口（#settings 路由）
 //!   - emit_ai_reply(type, aiId, aiName, taskId, text)  子窗口回传回复（IPC）
 //!
 //! 「ask 编排器」：
@@ -14,6 +15,7 @@
 //!     回调 emit_ai_reply，再由本端 emit('ai-reply', payload) 推给主窗口。
 
 mod auto_send;
+mod os_ask;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -318,6 +320,32 @@ async fn emit_ai_reply(
     Ok(())
 }
 
+/// 打开/聚焦独立设置窗口。
+/// 与主窗口共用同一份 SPA 产物，通过 `#settings` 路由渲染 SettingsApp。
+#[tauri::command]
+async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    const LABEL: &str = "settings";
+    if let Some(w) = app.get_webview_window(LABEL) {
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(
+        &app,
+        LABEL,
+        WebviewUrl::App("index.html#settings".into()),
+    )
+    .title("AskAll 齐问 · 设置")
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
+    .hidden_title(true)
+    .traffic_light_position(tauri::LogicalPosition::new(16.0, 26.0))
+    .inner_size(760.0, 640.0)
+    .min_inner_size(560.0, 480.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    let _ = win.set_focus();
+    Ok(())
+}
+
 // ---------- 入口 ----------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -325,15 +353,30 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new().build(),
+        )
         .manage(AppState {
             current_task: Mutex::new(None),
+        })
+        .setup(|app| {
+            // 注册系统级「划词提问」全局快捷键（失败不阻断启动，仅告警）。
+            if let Err(e) = os_ask::setup(app.handle()) {
+                log::warn!("[askall] 注册全局划词快捷键失败：{e}");
+            }
+            // macOS：注册系统右键「服务」菜单（best-effort，非 macOS 为空操作）。
+            os_ask::setup_os_services(app.handle());
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             ask_ai,
             ask_ai_followup,
             get_task,
             open_ai_webview,
+            open_settings_window,
             emit_ai_reply,
+            os_ask::request_accessibility_permission,
+            os_ask::accessibility_permission_granted,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AskAll desktop");

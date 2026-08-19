@@ -14,8 +14,11 @@
       {
         "label": "main",
         "title": "AskAll 齐问",
-        "width": 960,
-        "height": 680,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 26 },
+        "width": 1080,
+        "height": 720,
         "minWidth": 720,
         "minHeight": 480,
         "resizable": true,

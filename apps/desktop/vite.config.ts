@@ -9,6 +9,9 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  // 复用扩展端 public 静态资源（应用图标 png + AI 厂商官方 svg），
+  // 供共享组件经 assetUrl('icon/…') / assetUrl('ai/…') 引用
+  publicDir: path.resolve(__dirname, '../extension/public'),
   // Tauri 自带终端输出，无需 Vite 清屏
   clearScreen: false,
   server: {

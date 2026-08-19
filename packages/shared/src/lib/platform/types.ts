@@ -1,7 +1,7 @@
 /**
  * PlatformApi —— 浏览器扩展 / Tauri 桌面端共用 UI 的平台抽象层。
  *
- * 共享 UI 组件（App / AiConfigPanel / HistoryPanel / FloatingPanel）只调用
+ * 共享 UI 组件（Workspace / SettingsApp / AiConfigPanel / FloatingPanel 等）只调用
  * `getPlatform()` 返回的接口，不直接触碰 `browser.*` 或 `@tauri-apps/api`。
  * 具体实现由各 App 在启动时通过 `setPlatform()` 注入：
  *   - 浏览器扩展：apps/extension/entrypoints/_platform.ts

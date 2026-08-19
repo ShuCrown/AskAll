@@ -18,11 +18,23 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 url = "2"
 log = "0.4"
+# 划词/系统级内容捕获：选中文字（AX/Ctrl+C）+ 剪贴板兜底
+get-selected-text = "0.1"
+arboard = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 读取其它 App 选中文字所需的「无障碍」权限查询/申请
+macos-accessibility-client = "0.0.2"
+# macOS 原生 NSServices（右键「服务」菜单）集成
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
 
 [features]
 # 生产构建走自定义协议（tauri://localhost）加载前端资源

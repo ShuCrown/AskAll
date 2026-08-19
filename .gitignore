@@ -27,3 +27,7 @@ web-ext.config.ts
 .workbuddy
 .history
 .trae-*
+
+# Tauri
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen

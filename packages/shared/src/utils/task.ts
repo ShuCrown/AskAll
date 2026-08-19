@@ -31,6 +31,12 @@ export interface AskTask {
   createdAt: number;
   /** 会话标识：多轮追问共享同一 conversationId，用于历史分组 */
   conversationId: string;
+  /**
+   * 对应历史记录条目的 id（v1.1 新增，可选）。
+   * 扩展端由 background 在 addHistory 后回填；桌面端由前端 store 自行维护映射。
+   * 用于 AI_REPLY_DONE 时把回答快照写入正确的历史条目。
+   */
+  historyId?: string;
   /** aiId -> 结果 */
   results: Record<string, AiResult>;
 }

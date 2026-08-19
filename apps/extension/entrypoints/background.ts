@@ -4,6 +4,7 @@ import {
   autoFillAndSend,
   addHistory,
   updateHistoryUrl,
+  mergeAnswer,
   genId,
   type AiConfig,
   type AskTask,
@@ -99,6 +100,11 @@ export default defineBackground(() => {
         status: 'done',
         answer: msg.text ?? '',
       });
+      // 回答快照落盘：写入对应历史条目，供工作台回放（兜底文案会被标记为 error）
+      const task = msg.taskId ? tasks.get(msg.taskId) : undefined;
+      if (task?.historyId) {
+        void mergeAnswer(task.historyId, msg.aiId, msg.aiName, msg.text ?? '');
+      }
       notifyReplyDone(msg.aiName);
       return;
     }
@@ -286,6 +292,8 @@ export default defineBackground(() => {
       aiUrls,
       conversationId,
     );
+    // 回填历史条目 id：AI_REPLY_DONE 时据此把回答快照写入正确的历史记录
+    task.historyId = historyItem.id;
 
     let winIndex = 0;
     for (const ai of enabledList) {
@@ -392,6 +400,8 @@ export default defineBackground(() => {
       aiUrls,
       conversationId,
     );
+    // 回填历史条目 id：AI_REPLY_DONE 时据此把回答快照写入正确的历史记录
+    task.historyId = historyItem.id;
 
     // 优先复用已打开的「原有」聊天窗口
     const reused = new Set<string>();
