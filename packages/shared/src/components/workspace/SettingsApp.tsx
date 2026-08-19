@@ -1,12 +1,12 @@
 /**
  * SettingsApp —— 独立设置载体（v1.1）。
  *
- * 桌面端：独立设置窗口（#settings 路由渲染本组件）；
- * 扩展端：options 页渲染本组件。
- * 内容与原「AI 配置」Tab 一致（AiConfigPanel），openMode 状态自持。
+ * 桌面端：独立设置窗口（#settings 路由渲染本组件），右上角不设关闭按钮——
+ * macOS 红绿灯 / Windows 窗口按钮即可关闭；
+ * 扩展端：options 页渲染本组件，浏览器标签页由用户自行关闭（脚本无法关闭普通标签页）。
+ * 内容为 AiConfigPanel，openMode 状态自持。
  */
 import { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
 import AiConfigPanel from '../AiConfigPanel';
 import { getPlatform } from '../../lib/platform';
 import type { OpenMode } from '../../lib/platform';
@@ -32,15 +32,11 @@ export default function SettingsApp() {
     await getPlatform().storage.setItem(OPEN_MODE_KEY, mode);
   };
 
-  const handleClose = () => {
-    getPlatform().window.close().catch(() => {});
-  };
-
   return (
     <div className="flex h-full flex-col bg-background">
       <div
         data-tauri-drag-region
-        className={`flex shrink-0 items-center justify-between border-b bg-card py-4 ${
+        className={`flex shrink-0 items-center border-b bg-card py-4 ${
           isMacTauri() ? 'pl-[74px] pr-2' : 'px-2'
         }`}
       >
@@ -57,15 +53,6 @@ export default function SettingsApp() {
             v{version}
           </span>
         </span>
-        <button
-          type="button"
-          onClick={handleClose}
-          aria-label="关闭"
-          title="关闭"
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-        >
-          <X className="h-4 w-4" />
-        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         <AiConfigPanel openMode={openMode} onModeChange={handleModeChange} />

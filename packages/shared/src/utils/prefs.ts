@@ -68,3 +68,17 @@ export async function getLastSelectedAis(): Promise<string[] | null> {
 export async function setLastSelectedAis(ids: string[]): Promise<void> {
   await getPlatform().storage.setItem(LAST_SELECTED_KEY, ids);
 }
+
+const PINNED_KEY = 'local:pinnedConversations';
+
+/** 读取置顶会话 key 列表（数组顺序 = 置顶顺序，最新置顶在前） */
+export async function getPinnedConversations(): Promise<string[]> {
+  const stored =
+    await getPlatform().storage.getItem<string[]>(PINNED_KEY);
+  return Array.isArray(stored) ? stored : [];
+}
+
+/** 持久化置顶会话 key 列表 */
+export async function setPinnedConversations(keys: string[]): Promise<void> {
+  await getPlatform().storage.setItem(PINNED_KEY, keys);
+}

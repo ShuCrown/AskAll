@@ -4,16 +4,21 @@
  * 顶部行 = 收起按钮 + 搜索按钮（搜索走弹窗 SearchDialog）；
  * macOS 桌面端（overlay 标题栏）下顶部行左侧为系统红绿灯预留空间，
  * 且整行作为窗口拖拽区（data-tauri-drag-region）。
- * 其下为品牌行、新话题按钮、按日期分组的会话列表、底部设置入口。
+ * 其下为品牌行、新话题按钮、会话列表（置顶分组 + 按日期分组）、底部设置入口。
+ *
+ * 会话行：只展示话题文字；悬浮时左侧浮现置顶图标、右侧浮现更新时间提示；
+ * 已置顶的话题固定显示置顶图标（点击取消置顶），置顶项排序在列表最上方。
  */
-import { useEffect, useMemo, useState } from 'react';
-import { Loader2, PanelLeftClose, Search, Settings, SquarePen } from 'lucide-react';
-import { getPlatform } from '../../lib/platform';
+import { useMemo, useState } from 'react';
 import {
-  isTaskFinished,
-  selectConversations,
-  useAskStore,
-} from '../../store/askStore';
+  PanelLeftClose,
+  Pin,
+  Search,
+  Settings,
+  SquarePen,
+} from 'lucide-react';
+import { getPlatform } from '../../lib/platform';
+import { selectConversations, useAskStore } from '../../store/askStore';
 import type { Conversation } from '../../utils/history';
 import { cn } from '../../lib/utils';
 
@@ -37,11 +42,80 @@ function dayLabel(ts: number): string {
   return `${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
-function timeLabel(ts: number): string {
-  return new Date(ts).toLocaleTimeString('zh-CN', {
+/** 更新时间提示：今天仅时分，昨天带「昨天」，更早带日期 */
+function updateTimeLabel(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const startOfDay = (x: Date) =>
+    new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+  const hhmm = d.toLocaleTimeString('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
   });
+  if (diff === 0) return `更新于 ${hhmm}`;
+  if (diff === 1) return `更新于 昨天 ${hhmm}`;
+  return `更新于 ${d.getMonth() + 1}月${d.getDate()}日 ${hhmm}`;
+}
+
+/** 单个会话行：只展示话题文字；悬浮显示置顶图标（左）与更新时间（右） */
+function ConvRow({
+  conv,
+  pinned,
+  active,
+  onOpen,
+  onTogglePin,
+}: {
+  conv: Conversation;
+  pinned: boolean;
+  active: boolean;
+  onOpen: () => void;
+  onTogglePin: () => void;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') onOpen();
+      }}
+      className={cn(
+        'group flex w-full cursor-pointer items-center gap-1 rounded-md px-1.5 py-1.5 transition-colors hover:bg-accent',
+        active && 'bg-secondary',
+      )}
+    >
+      {/* 置顶图标：使用同一个图标，置顶时始终显示，未置顶时悬浮显示 */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onTogglePin();
+        }}
+        title={pinned ? '取消置顶' : '置顶'}
+        className={cn(
+          'flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground',
+          pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+        )}
+      >
+        <Pin className="h-3 w-3" fill="currentColor" />
+      </button>
+
+      <span
+        className={cn(
+          'line-clamp-2 flex-1 text-xs leading-snug',
+          active ? 'font-medium text-foreground' : 'text-foreground/85',
+        )}
+      >
+        {conv.root.question}
+      </span>
+
+      {/* 悬浮时间提示 */}
+      <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+        {updateTimeLabel(conv.root.timestamp)}
+      </span>
+    </div>
+  );
 }
 
 export default function SessionSidebar({
@@ -55,35 +129,31 @@ export default function SessionSidebar({
 }) {
   const history = useAskStore((s) => s.history);
   const activeConvId = useAskStore((s) => s.activeConvId);
-  const liveTasks = useAskStore((s) => s.liveTasks);
   const openConversation = useAskStore((s) => s.openConversation);
   const newConversation = useAskStore((s) => s.newConversation);
+  const pinned = useAskStore((s) => s.pinned);
+  const togglePin = useAskStore((s) => s.togglePin);
 
-  const [version, setVersion] = useState('');
   const macTauri = useMemo(() => isMacTauri(), []);
-
-  useEffect(() => {
-    setVersion(getPlatform().app.getVersion());
-  }, []);
 
   const conversations = useMemo(() => selectConversations(history), [history]);
 
-  // 按日期分组（保持最新在前）
-  const groups = useMemo(() => {
+  // 置顶分组 + 普通分组（按日期）
+  const { pinnedConvs, groups } = useMemo(() => {
+    const byKey = new Map(conversations.map((c) => [c.key, c]));
+    const pinnedConvs = pinned
+      .map((k) => byKey.get(k))
+      .filter((c): c is Conversation => !!c);
+    const rest = conversations.filter((c) => !pinned.includes(c.key));
     const out: { label: string; items: Conversation[] }[] = [];
-    for (const conv of conversations) {
+    for (const conv of rest) {
       const label = dayLabel(conv.root.timestamp);
       const last = out[out.length - 1];
       if (last && last.label === label) last.items.push(conv);
       else out.push({ label, items: [conv] });
     }
-    return out;
-  }, [conversations]);
-
-  const isLive = (key: string) =>
-    Object.values(liveTasks).some(
-      (t) => t.conversationId === key && !isTaskFinished(t),
-    );
+    return { pinnedConvs, groups: out };
+  }, [conversations, pinned]);
 
   const openSettings = () => {
     getPlatform().window.openSettings().catch(() => {});
@@ -91,6 +161,18 @@ export default function SessionSidebar({
 
   const iconBtn =
     'flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground';
+
+  const renderConvs = (items: Conversation[]) =>
+    items.map((conv) => (
+      <ConvRow
+        key={conv.key}
+        conv={conv}
+        pinned={pinned.includes(conv.key)}
+        active={conv.key === activeConvId}
+        onOpen={() => openConversation(conv.key)}
+        onTogglePin={() => togglePin(conv.key)}
+      />
+    ));
 
   return (
     <div className="flex h-full flex-col bg-background">
@@ -149,73 +231,48 @@ export default function SessionSidebar({
         </button>
       </div>
 
-      {/* 会话列表 */}
+      {/* 会话列表：置顶分组 + 按日期分组 */}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-        {groups.length === 0 ? (
+        {conversations.length === 0 ? (
           <p className="py-8 text-center text-xs text-muted-foreground">
             暂无历史会话
           </p>
         ) : (
-          groups.map((g) => (
-            <div key={g.label} className="mb-1">
-              <p className="px-1.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
-                {g.label}
-              </p>
-              <div className="flex flex-col gap-0.5">
-                {g.items.map((conv) => {
-                  const active = conv.key === activeConvId;
-                  const live = isLive(conv.key);
-                  return (
-                    <button
-                      key={conv.key}
-                      type="button"
-                      onClick={() => openConversation(conv.key)}
-                      className={cn(
-                        'w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent',
-                        active && 'bg-secondary',
-                      )}
-                    >
-                      <span className="flex items-start gap-1.5">
-                        {live && (
-                          <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary" />
-                        )}
-                        <span
-                          className={cn(
-                            'line-clamp-2 flex-1 text-xs leading-snug',
-                            active
-                              ? 'font-medium text-foreground'
-                              : 'text-foreground/85',
-                          )}
-                        >
-                          {conv.root.question}
-                        </span>
-                      </span>
-                      <span className="mt-0.5 block pl-[18px] text-[10px] text-muted-foreground">
-                        {timeLabel(conv.root.timestamp)}
-                        {conv.turns.length > 1 && ` · ${conv.turns.length} 轮`}
-                      </span>
-                    </button>
-                  );
-                })}
+          <>
+            {pinnedConvs.length > 0 && (
+              <div className="mb-1">
+                <p className="px-1.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                  置顶
+                </p>
+                <div className="flex flex-col gap-0.5">
+                  {renderConvs(pinnedConvs)}
+                </div>
               </div>
-            </div>
-          ))
+            )}
+            {groups.map((g) => (
+              <div key={g.label} className="mb-1">
+                <p className="px-1.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                  {g.label}
+                </p>
+                <div className="flex flex-col gap-0.5">
+                  {renderConvs(g.items)}
+                </div>
+              </div>
+            ))}
+          </>
         )}
       </div>
 
-      {/* 底部：设置（左）+ 版本号（最右），整行默认与背景一致、悬浮 #e0e0e0 */}
-      <div className="flex shrink-0 items-center justify-between px-3 py-2 transition-colors hover:bg-[#e0e0e0]">
+      {/* 底部：设置（悬浮样式与新话题一致） */}
+      <div className="px-3 py-2">
         <button
           type="button"
           onClick={openSettings}
-          className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-[#e0e0e0]"
         >
-          <Settings className="h-3.5 w-3.5" />
+          <Settings className="h-4 w-4" />
           设置
         </button>
-        <span className="text-[10px] text-muted-foreground/60">
-          v{version}
-        </span>
       </div>
     </div>
   );

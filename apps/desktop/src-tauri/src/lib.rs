@@ -210,13 +210,16 @@ async fn dispatch_ask(
         return Err("未选择任何 AI".into());
     }
 
-    // 追问复用当前任务的 conversationId；否则新建。
-    let conversation_id = {
+    // 会话归属：追问复用当前任务的 conversationId（延续同一话题）；
+    // 新提问总是开启新会话（否则「新话题」会被追加进上一个话题）。
+    let conversation_id = if follow_up {
         let guard = state.current_task.lock().await;
         guard
             .as_ref()
             .map(|t| t.conversation_id.clone())
             .unwrap_or_else(gen_id)
+    } else {
+        gen_id()
     };
     let task_id = gen_id();
 

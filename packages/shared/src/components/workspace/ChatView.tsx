@@ -7,8 +7,8 @@
  *   - 历史侧：history.answers 快照（已落盘的最终回答）。
  * 底部固定 Composer 用于追问。
  */
-import { useEffect, useMemo, useRef } from 'react';
-import { ExternalLink } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Copy, ExternalLink } from 'lucide-react';
 import { getPlatform } from '../../lib/platform';
 import {
   buildTurns,
@@ -31,24 +31,52 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
     getPlatform().ask.openAiTab(url).catch(() => {});
   };
 
+  const [copied, setCopied] = useState(false);
+  const copyQuestion = async () => {
+    try {
+      await navigator.clipboard.writeText(turn.question);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* 剪贴板不可用时静默 */
+    }
+  };
+
   // 该轮的回答展示：实时结果 > 历史快照 > 仅链接（旧数据兼容）
   const liveResults = turn.liveResults ? Object.values(turn.liveResults) : null;
 
   return (
-    <div className="flex flex-col gap-2">
-      {/* 问题 */}
-      <div className="flex flex-col gap-1">
-        <span className="text-[11px] text-muted-foreground">
-          第 {index + 1} 轮 ·{' '}
-          {new Date(turn.timestamp).toLocaleTimeString('zh-CN', {
-            hour: '2-digit',
-            minute: '2-digit',
-          })}
-        </span>
-        <div className="self-start max-w-full rounded-lg border bg-card px-3 py-2">
+    <div className="group flex flex-col gap-2">
+      {/* 问题气泡：右对齐，#eeeeee 背景，最大 70% 宽度 */}
+      <div className="flex flex-col items-end gap-1">
+        <div className="max-w-[70%] rounded-2xl bg-[#eeeeee] px-4 py-3">
           <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
             {turn.question}
           </p>
+        </div>
+        <div className="flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="text-[10px] text-muted-foreground/70">
+            {new Date(turn.timestamp).toLocaleString('zh-CN', {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })}
+          </span>
+          <button
+            type="button"
+            onClick={copyQuestion}
+            title="复制问题"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            {copied ? (
+              <Check className="h-3 w-3 text-green-600" />
+            ) : (
+              <Copy className="h-3 w-3" />
+            )}
+          </button>
         </div>
       </div>
 

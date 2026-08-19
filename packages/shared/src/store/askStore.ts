@@ -21,7 +21,12 @@ import {
   type HistoryItem,
 } from '../utils/history';
 import { mergeConfigs, type AiConfig } from '../utils/aiConfig';
-import { getLastSelectedAis, setLastSelectedAis } from '../utils/prefs';
+import {
+  getLastSelectedAis,
+  getPinnedConversations,
+  setLastSelectedAis,
+  setPinnedConversations,
+} from '../utils/prefs';
 import type { AiResult, AskTask } from '../utils/task';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
@@ -68,6 +73,8 @@ export interface AskStoreState {
   sending: boolean;
   /** 外部提问注入（OS 级划词/右键菜单），由 Composer 消费 */
   pendingQuestion: string | null;
+  /** 置顶会话 key 列表（顺序即置顶顺序，最新在前；持久化 local:pinnedConversations） */
+  pinned: string[];
 
   hydrate: () => Promise<void>;
   refreshHistory: () => Promise<void>;
@@ -78,6 +85,7 @@ export interface AskStoreState {
   openConversation: (key: string) => void;
   newConversation: () => void;
   toggleVendor: (id: string) => void;
+  togglePin: (key: string) => void;
   setPendingQuestion: (text: string | null) => void;
 }
 
@@ -137,20 +145,25 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
     selected: [],
     sending: false,
     pendingQuestion: null,
+    pinned: [],
 
     hydrate: async () => {
       const platform = getPlatform();
-      const [history, storedConfigs, lastSel] = await Promise.all([
+      const [history, storedConfigs, lastSel, pinned] = await Promise.all([
         getHistory(),
         platform.storage.getItem<AiConfig[]>(AI_CONFIGS_KEY),
         getLastSelectedAis(),
+        getPinnedConversations(),
       ]);
       const configs = mergeConfigs(storedConfigs ?? null);
-      const validIds = new Set(configs.map((c) => c.id));
+      const enabledIds = new Set(
+        configs.filter((c) => c.enabled).map((c) => c.id),
+      );
+      // 新话题默认选择 = 设置中「启用」勾选的 AI；持久化选择同样过滤停用项
       const selected =
-        lastSel && lastSel.some((id) => validIds.has(id))
-          ? lastSel.filter((id) => validIds.has(id))
-          : configs.filter((c) => c.enabled).map((c) => c.id);
+        lastSel && lastSel.some((id) => enabledIds.has(id))
+          ? lastSel.filter((id) => enabledIds.has(id))
+          : [...enabledIds];
 
       // 恢复进行中的任务（popup 重开 / 冷启动均可续看进度）
       const liveTasks: Record<string, AskTask> = {};
@@ -167,6 +180,7 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
         configs,
         selected,
         liveTasks,
+        pinned,
       });
     },
 
@@ -181,10 +195,13 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
       );
       const configs = mergeConfigs(stored ?? null);
       set((s) => {
-        const validIds = new Set(configs.map((c) => c.id));
-        let selected = s.selected.filter((id) => validIds.has(id));
+        const enabledIds = new Set(
+          configs.filter((c) => c.enabled).map((c) => c.id),
+        );
+        // 跟随「启用」勾选：停用的 AI 从当前选择中移除；为空时默认全选启用项
+        let selected = s.selected.filter((id) => enabledIds.has(id));
         if (selected.length === 0) {
-          selected = configs.filter((c) => c.enabled).map((c) => c.id);
+          selected = [...enabledIds];
         }
         return { configs, selected };
       });
@@ -277,6 +294,16 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
           : [...s.selected, id];
         void setLastSelectedAis(selected);
         return { selected };
+      });
+    },
+
+    togglePin: (key) => {
+      set((s) => {
+        const pinned = s.pinned.includes(key)
+          ? s.pinned.filter((x) => x !== key)
+          : [key, ...s.pinned];
+        void setPinnedConversations(pinned);
+        return { pinned };
       });
     },
 
