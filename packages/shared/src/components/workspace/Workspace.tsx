@@ -26,6 +26,7 @@ import { selectConversations, useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
 import GridChat from './GridChat';
 import ChatView from './ChatView';
+import Composer from './Composer';
 import EmptyState from './EmptyState';
 import SearchDialog from './SearchDialog';
 import SessionSidebar, { isMacTauri } from './SessionSidebar';
@@ -169,13 +170,24 @@ export default function Workspace({
    * 右侧内容：灰底之上四周留白的白色圆角卡片，视觉悬浮（Trae Work 式）。
    * 收起态下卡片占满整个 main 区（与展开态等高），顶部行悬浮于卡片之上，
    * 卡片内部预留等高占位（h-14 = py-4×2 + 按钮 24px）避免内容与顶栏重叠。
+   *
+   * 桌面端（田字格）把「chat 区」与「底部问答输入框」拆成两块独立卡片，
+   * 用 gap 隔开，互不合在一起；扩展端时间线内仍自带 Composer，不在此重复。
    */
-  const mainCard = (
-    <div className="absolute inset-0 p-2">
-      <div className="flex h-full flex-col overflow-hidden rounded-xl bg-card shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
-        {!sidebarOpen && <div className="h-14 shrink-0" aria-hidden="true" />}
-        <div className="min-h-0 flex-1">{main}</div>
+  const bottomComposer =
+    isTauri && activeConvId ? (
+      <div className="shrink-0 rounded-xl bg-card px-3 py-2.5 shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
+        <Composer placeholder="继续追问，将发送至所选 AI 的当前聊天页…" />
       </div>
+    ) : null;
+
+  const mainCard = (
+    <div className="absolute inset-0 flex flex-col gap-2.5 p-2.5">
+      {!sidebarOpen && <div className="h-14 shrink-0" aria-hidden="true" />}
+      <div className="min-h-0 flex-1 overflow-hidden rounded-xl bg-card shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
+        {main}
+      </div>
+      {bottomComposer}
     </div>
   );
 

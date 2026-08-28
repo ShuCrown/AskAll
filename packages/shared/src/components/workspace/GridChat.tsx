@@ -6,23 +6,22 @@
  *
  * 交互：
  *   - 默认「田字格」：2 列网格并排展示本会话全部 AI 的聊天页；
- *   - 顶部 AI 按钮 = 放大该 chat：整窗铺满（其余格子尺寸归零即隐藏），
- *     顶部出现「还原」按钮回到田字格；
- *   - 底部 Composer 用于追问（复用各 AI 已打开的聊天页）。
+ *   - 每个格子上部有一条独立标题栏：左侧 AI 名称，右侧「放大」按钮，
+ *     点击代价格铺满整窗（其余格子隐藏），标题栏右上角变为「收起」回到田字格；
+ *   - 底部追问输入框（Composer）由外层 Workspace 以独立块展示。
  *
  * 仅桌面端渲染（扩展端无 attach Webview 能力，继续用 ChatView 时间线）。
- * 格子的可视边框/骨架由 DOM 占位提供；真实页面覆盖其上（native webview 层），
- * 因此格子内部不放置任何交互控件，状态与操作统一收敛到顶部工具条。
+ * 格子的可视边框/骨架由 DOM 占位提供；真实页面覆盖其上（native webview 层）。
+ * 每个格子的标题栏（DOM）高度为 CELL_HEADER_H，Rust 布局时把聊天页下移该高度，
+ * 使标题栏露在 webview 之上、可正常点击放大/收起。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LayoutGrid, Loader2, Maximize2, Minimize2 } from 'lucide-react';
 import { getPlatform, type OpenMode } from '../../lib/platform';
 import { useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
-import { isFallbackNotice } from '../../utils/history';
 import type { AiStatus } from '../../utils/task';
 import AiIcon from './AiIcon';
-import Composer from './Composer';
 
 /** 「打开方式」存储键（与 shared App.tsx / platform-tauri 一致） */
 const OPEN_MODE_KEY = 'local:openMode';
@@ -37,13 +36,9 @@ interface GridAi {
   answer?: string;
 }
 
-const STATUS_DOT: Record<AiStatus, string> = {
-  opening: 'bg-muted-foreground',
-  sending: 'bg-blue-500',
-  streaming: 'bg-amber-500',
-  done: 'bg-green-500',
-  error: 'bg-red-500',
-};
+/** 每个格子顶部标题栏高度（逻辑 px = 主窗口 CSS px）。Rust 布局把聊天页下移该高度，
+ *  使标题栏（AI 名称 + 放大/收起按钮）露在 native webview 之上可交互。 */
+const CELL_HEADER_H = 30;
 
 export default function GridChat({ convKey }: { convKey: string }) {
   const activeConvId = useAskStore((s) => s.activeConvId);
@@ -103,6 +98,8 @@ export default function GridChat({ convKey }: { convKey: string }) {
 
   // 布局：把各聊天页摆到对应格子（放大 = focus 格铺满网格区，其余隐藏）。
   // browser 模式不注入本地网格（聊天页在系统浏览器打开），跳过布局。
+  // 每个格子的聊天页 DOM/native webview 都下移 CELL_HEADER_H，腾出顶部标题栏，
+  // 标题栏（AI 名称 + 放大/收起按钮）因此露在页面之上、可交互。
   useEffect(() => {
     const el = gridRef.current;
     const layoutFn = getPlatform().ask.layoutAiGrid;
@@ -111,22 +108,40 @@ export default function GridChat({ convKey }: { convKey: string }) {
     const apply = () => {
       const r = el.getBoundingClientRect();
       const gap = 8;
-      const cells = [];
+      const cells: {
+        aiId: string;
+        url: string;
+        name: string;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+      }[] = [];
       const focusAi = focusKey ? ais.find((a) => keyOf(a) === focusKey) : undefined;
-      const cell = (a: GridAi, x: number, y: number, width: number, height: number) => ({
-        aiId: keyOf(a),
-        url: a.url,
-        name: a.name,
-        x,
-        y,
-        width,
-        height,
-      });
+      // 传入 Rust 的是「聊天页」rect：在完整格子位置上再往下让出标题栏高度
+      const pushCell = (
+        a: GridAi,
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        visible: boolean,
+      ) => {
+        cells.push({
+          aiId: keyOf(a),
+          url: a.url,
+          name: a.name,
+          x: visible ? x : 0,
+          y: visible ? y + CELL_HEADER_H : 0,
+          width: visible ? width : 0,
+          height: visible ? Math.max(0, height - CELL_HEADER_H) : 0,
+        });
+      };
       if (focusAi) {
-        cells.push(cell(focusAi, r.left, r.top, r.width, r.height));
+        pushCell(focusAi, r.left, r.top, r.width, r.height, true);
         for (const a of ais) {
           if (keyOf(a) === focusKey) continue;
-          cells.push(cell(a, 0, 0, 0, 0));
+          pushCell(a, 0, 0, 0, 0, false);
         }
       } else {
         const cols = Math.min(2, Math.max(1, ais.length));
@@ -136,7 +151,7 @@ export default function GridChat({ convKey }: { convKey: string }) {
         ais.forEach((a, i) => {
           const col = i % cols;
           const row = Math.floor(i / cols);
-          cells.push(cell(a, r.left + col * (w + gap), r.top + row * (h + gap), w, h));
+          pushCell(a, r.left + col * (w + gap), r.top + row * (h + gap), w, h, true);
         });
       }
       void layoutFn(cells).catch(() => {});
@@ -152,84 +167,52 @@ export default function GridChat({ convKey }: { convKey: string }) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* 顶部工具条：AI 按钮（点击放大 / 放大态还原）+ 进行中计数 */}
-      <div className="flex shrink-0 items-center gap-1.5 border-b px-3 py-2">
-        <span className="mr-1 flex shrink-0 items-center gap-1.5 text-xs font-medium text-muted-foreground">
-          {focusKey ? (
-            <>
-              <Minimize2 className="h-3.5 w-3.5" />
-              已放大
-            </>
-          ) : (
-            <>
-              <LayoutGrid className="h-3.5 w-3.5" />
-              田字格
-            </>
-          )}
+      {/* 顶部信息条（位于网格区之外，聊天页从不覆盖它） */}
+      <div className="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5">
+        <LayoutGrid className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-xs font-medium text-muted-foreground">
+          {focusKey ? '已放大 · 点击标题栏右上角「收起」回到田字格' : '田字格'}
         </span>
-        {ais.map((a) => {
-          const key = keyOf(a);
-          const active = focusKey === key;
-          const fallback = a.answer ? isFallbackNotice(a.answer) : false;
-          return (
-            <button
-              type="button"
-              key={key}
-              onClick={() => setFocusKey(active ? null : key)}
-              title={`${active ? '还原田字格' : `放大 ${a.name}`}\n当前地址：${a.url}`}
-              className={cn(
-                'flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors',
-                active
-                  ? 'bg-secondary font-medium text-foreground'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-              )}
-            >
-              <AiIcon aiId={a.id} name={a.name} size={14} />
-              <span className="max-w-[110px] truncate">{a.name}</span>
-              {a.status && (
-                <span
-                  className={cn(
-                    'h-1.5 w-1.5 shrink-0 rounded-full',
-                    fallback ? 'bg-red-500' : STATUS_DOT[a.status],
-                  )}
-                />
-              )}
-              {active ? (
-                <Minimize2 className="h-3 w-3 shrink-0 opacity-60" />
-              ) : (
-                <Maximize2 className="h-3 w-3 shrink-0 opacity-60" />
-              )}
-            </button>
-          );
-        })}
-        <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
+        <span className="ml-auto text-[11px] text-muted-foreground">
           共 {ais.length} 个 AI 聊天页
         </span>
       </div>
 
-      {/* 田字格区：DOM 占位（骨架），真实页面由 Rust webview 覆盖 */}
+      {/* 田字格区：DOM 占位（骨架），真实页面由 Rust webview 覆盖（下移标题栏高度） */}
       <div ref={gridRef} className="relative min-h-0 flex-1">
         {visibleAis.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
             <p>发起提问后，这里将以田字格展示各 AI 的聊天页</p>
           </div>
         ) : focusKey && visibleAis[0] ? (
-          <GridCellView ai={visibleAis[0]} embedded={openMode === 'embedded'} />
+          <GridCellView
+            ai={visibleAis[0]}
+            embedded={openMode === 'embedded'}
+            focused
+            onFocus={setFocusKey}
+          />
         ) : (
-          <GridCells ais={ais} embedded={openMode === 'embedded'} />
+          <GridCells
+            ais={ais}
+            embedded={openMode === 'embedded'}
+            onFocus={setFocusKey}
+          />
         )}
-      </div>
-
-      {/* 追问输入：发送至所选 AI 的已打开聊天页 */}
-      <div className="shrink-0 border-t px-3 py-2">
-        <Composer placeholder="继续追问，将发送至所选 AI 的当前聊天页…" />
       </div>
     </div>
   );
 }
 
 /** 田字格骨架容器：列/行数与 Rust 布局计算保持一致（cols=2，rows=ceil(n/2)） */
-function GridCells({ ais, embedded }: { ais: GridAi[]; embedded: boolean }) {
+function GridCells({
+  ais,
+  embedded,
+  onFocus,
+}: {
+  ais: GridAi[];
+  embedded: boolean;
+  onFocus: (key: string | null) => void;
+}) {
   const cols = Math.min(2, Math.max(1, ais.length));
   const rows = Math.ceil(ais.length / cols);
   return (
@@ -241,23 +224,67 @@ function GridCells({ ais, embedded }: { ais: GridAi[]; embedded: boolean }) {
       }}
     >
       {ais.map((a) => (
-        <GridCellView key={a.id ?? a.name} ai={a} embedded={embedded} />
+        <GridCellView
+          key={a.id ?? a.name}
+          ai={a}
+          embedded={embedded}
+          focused={false}
+          onFocus={onFocus}
+        />
       ))}
     </div>
   );
 }
 
-/** 单个格子：真实页面（embedded）或提示（browser）覆盖前的占位骨架 */
-function GridCellView({ ai, embedded }: { ai: GridAi; embedded: boolean }) {
+/** 单个格子：顶部独立标题栏（AI 名称 + 放大/收起按钮），下方是聊天页。
+ *  标题栏高度为 CELL_HEADER_H，Rust 布局把聊天页下移该高度，使标题栏露在
+ *  native webview 之上、按钮可点击（放大铺满 / 收起回田字格）。 */
+function GridCellView({
+  ai,
+  embedded,
+  focused,
+  onFocus,
+}: {
+  ai: GridAi;
+  embedded: boolean;
+  focused: boolean;
+  onFocus: (key: string | null) => void;
+}) {
   return (
-    <div className="relative flex min-h-0 flex-col overflow-hidden rounded-md border bg-card">
-      <div className="flex shrink-0 items-center gap-1.5 border-b px-2 py-1">
+    <div
+      className={cn(
+        'relative flex min-h-0 flex-col overflow-hidden rounded-md border bg-card',
+        focused && 'rounded-xl border-border shadow-[0_4px_20px_rgba(0,0,0,0.08)]',
+      )}
+      style={{ height: focused ? '100%' : undefined }}
+    >
+      {/* 标题栏：左 AI 名称，右 放大/收起 */}
+      <div
+        className="flex shrink-0 items-center gap-1.5 border-b px-2"
+        style={{ height: CELL_HEADER_H }}
+      >
         <AiIcon aiId={ai.id} name={ai.name} size={14} />
-        <span className="truncate text-xs font-medium">{ai.name}</span>
-        {embedded && (
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">
+          {ai.name}
+        </span>
+        {embedded && !focused && (
           <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
         )}
+        <button
+          type="button"
+          onClick={() => onFocus(focused ? null : (ai.id ?? ai.name))}
+          title={focused ? `收起 ${ai.name}，回到田字格` : `放大 ${ai.name}，铺满本窗口`}
+          className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          {focused ? (
+            <Minimize2 className="h-3.5 w-3.5" />
+          ) : (
+            <Maximize2 className="h-3.5 w-3.5" />
+          )}
+        </button>
       </div>
+
+      {/* 聊天页落点：下方空白由 native webview 覆盖 */}
       <div className="flex min-h-0 flex-1 items-center justify-center px-3 text-center text-[11px] text-muted-foreground">
         {embedded
           ? '聊天页加载中…'
