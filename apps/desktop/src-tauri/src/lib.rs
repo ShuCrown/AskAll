@@ -133,34 +133,72 @@ fn gen_id() -> String {
     format!("{:x}-{:x}", ms, c)
 }
 
+/// 创建或复用独立 AI 窗口（兜底路径：attach 到主窗口的聊天页不存在时，
+/// 如重启后回看历史会话，show_ai_chat 用）。
+fn get_or_create_ai_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    title: &str,
+    url: &str,
+    navigate: bool,
+    show: bool,
+) -> Result<tauri::WebviewWindow, String> {
+    if let Some(w) = app.get_webview_window(label) {
+        if show {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        if navigate {
+            let js = format!("window.location.replace({:?})", url);
+            let _ = w.eval(&js);
+        }
+        return Ok(w);
+    }
+    let parsed = url
+        .parse::<url::Url>()
+        .map_err(|e: url::ParseError| format!("invalid url: {e}"))?;
+    let win = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+        .title(title)
+        .inner_size(520.0, 720.0)
+        .min_inner_size(360.0, 480.0)
+        .visible(show)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(win)
+}
+
 /// 确保 `ai-{aiId}` 聊天页已作为 Webview attach 到主窗口，并定位到 (x,y,w,h)。
 /// 幂等：已存在时仅更新位置/尺寸（保留当前聊天状态，不重新加载）。
 /// 由两处调用：前端田字格布局（layout_ai_grid）与 ask 编排器（run_one_ai）。
 fn ensure_embedded_webview(
     app: &tauri::AppHandle,
-    ai_id: &str,
-    url: &str,
-    name: &str,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
+    cell: &GridCell,
 ) -> Result<tauri::Webview, String> {
-    let label = format!("ai-{}", ai_id);
+    let label = format!("ai-{}", cell.ai_id);
+    let pos = LogicalPosition::new(cell.x, cell.y);
+    let size = LogicalSize::new(cell.width, cell.height);
     if let Some(wv) = app.get_webview(&label) {
-        let _ = wv.set_position(Position::Logical(LogicalPosition::new(x, y)));
-        let _ = wv.set_size(Size::Logical(LogicalSize::new(w, h)));
+        let _ = wv.set_position(Position::Logical(pos));
+        let _ = wv.set_size(Size::Logical(size));
         return Ok(wv);
     }
-    let window = app.get_webview_window("main").ok_or("主窗口不存在")?;
-    let parsed = url
+    let main = app.get_webview_window("main").ok_or("主窗口不存在")?;
+    let parsed = cell
+        .url
         .parse::<url::Url>()
         .map_err(|e: url::ParseError| format!("invalid url: {e}"))?;
-    let wv = WebviewBuilder::new(window.window(), label, WebviewUrl::External(parsed))
-        .build()
+    // attach 到主窗口：Window::add_child(WebviewBuilder::new(label, url), pos, size)
+    let window = main.as_ref().window();
+    let wv_builder = WebviewBuilder::new(label, WebviewUrl::External(parsed));
+    let wv = window
+        .add_child(
+            wv_builder,
+            LogicalPosition::new(cell.x, cell.y),
+            LogicalSize::new(cell.width, cell.height),
+        )
         .map_err(|e| e.to_string())?;
-    let _ = wv.set_position(Position::Logical(LogicalPosition::new(x, y)));
-    let _ = wv.set_size(Size::Logical(LogicalSize::new(w, h)));
+    let _ = wv.set_position(Position::Logical(pos));
+    let _ = wv.set_size(Size::Logical(size));
     Ok(wv)
 }
 
@@ -193,24 +231,32 @@ async fn run_one_ai(
     // embedded：把聊天页 attach 到主窗口（不弹独立窗口），由前端田字格统一布局。
     // 位置先给默认值，前端 layout_ai_grid 会立即重排到对应格子。
     // 追问时复用同一 Webview（不导航不重载，保留当前聊天上下文）。
-    let webview =
-        match ensure_embedded_webview(&app, &cfg.id, &cfg.url, &cfg.name, 0.0, 0.0, 520.0, 720.0) {
-            Ok(w) => w,
-            Err(e) => {
-                let _ = app.emit(
-                    "ai-reply",
-                    ReplyPayload {
-                        kind: "AI_REPLY_DONE".into(),
-                        ai_id: cfg.id.clone(),
-                        ai_name: cfg.name.clone(),
-                        task_id,
-                        text: Some(format!("打开内嵌聊天页失败：{e}")),
-                        url: None,
-                    },
-                );
-                return;
-            }
-        };
+    let boot_cell = GridCell {
+        ai_id: cfg.id.clone(),
+        url: cfg.url.clone(),
+        name: Some(cfg.name.clone()),
+        x: 0.0,
+        y: 0.0,
+        width: 520.0,
+        height: 720.0,
+    };
+    let webview = match ensure_embedded_webview(&app, &boot_cell) {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = app.emit(
+                "ai-reply",
+                ReplyPayload {
+                    kind: "AI_REPLY_DONE".into(),
+                    ai_id: cfg.id.clone(),
+                    ai_name: cfg.name.clone(),
+                    task_id,
+                    text: Some(format!("打开内嵌聊天页失败：{e}")),
+                    url: None,
+                },
+            );
+            return;
+        }
+    };
 
     // 记录该 AI 聊天页当前所在 URL（配置首页），供差异导航：
     // 请求地址与此一致（或页面已自行跳到会话页）时只聚焦不跳转，
@@ -385,8 +431,7 @@ async fn show_ai_chat(
 #[tauri::command]
 async fn layout_ai_grid(app: tauri::AppHandle, cells: Vec<GridCell>) -> Result<(), String> {
     for c in cells {
-        let name = c.name.unwrap_or_else(|| "AskAll AI".into());
-        ensure_embedded_webview(&app, &c.ai_id, &c.url, &name, c.x, c.y, c.width, c.height)?;
+        ensure_embedded_webview(&app, &c)?;
     }
     Ok(())
 }
@@ -442,15 +487,18 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = w.set_focus();
         return Ok(());
     }
-    let win = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App("index.html#settings".into()))
-        .title("AskAll 齐问 · 设置")
+    let builder =
+        WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App("index.html#settings".into()))
+            .title("AskAll 齐问 · 设置")
+            .inner_size(760.0, 640.0)
+            .min_inner_size(560.0, 480.0);
+    // 标题栏样式仅 macOS 支持（Overlay 无边框），其它平台走默认标题栏
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(16.0, 26.0))
-        .inner_size(760.0, 640.0)
-        .min_inner_size(560.0, 480.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .traffic_light_position(tauri::LogicalPosition::new(16.0, 26.0));
+    let win = builder.build().map_err(|e| e.to_string())?;
     let _ = win.set_focus();
     Ok(())
 }

@@ -15,7 +15,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# unstable：启用实验性的 WebviewBuilder / get_webview（attach 到主窗口的聊天页，
+# 田字格布局用；tauri 2.11 中该能力仍标记为 unstable，锁版本使用）
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 tauri-plugin-global-shortcut = "2"
