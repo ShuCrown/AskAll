@@ -1,41 +1,61 @@
+/**
+ * FloatingPanel —— 划词/右键问答浮层（扩展端内容脚本注入；宿主页无 tailwind，全内联样式）。
+ *
+ * 与应用一致的「单块聊天」交互（v1.2，取代旧版 选AI→结果 两步视图）：
+ *   - 上方为滚动会话区：每轮 = 右对齐问题气泡 + 各 AI 回答卡（多卡并排网格）；
+ *   - 底部为单个 Composer：输入框 + 「已选 N 个 AI」浮层 + 发送（Enter 发送 / Shift+Enter 换行）；
+ *   - 各 AI 页签的回复经 background 广播（AI_SENDING/AI_REPLY/AI_REPLY_DONE），
+ *     按 taskId 就地流式更新到当前块；轮次乐观追加，任务经 getTask 轮询绑定；
+ *   - 首次发送为新会话提问（ask），其后为向已打开聊天窗口追问（followUp）。
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Minus, Pin, Settings, X } from 'lucide-react';
+import { Bot, ChevronDown, Minus, Pin, Settings, X } from 'lucide-react';
 import { mergeConfigs } from '../utils/aiConfig';
 import type { AiConfig } from '../utils/aiConfig';
-import type { AskTask, AiResult, AiStatus } from '../utils/task';
-import { getPlatform } from '../lib/platform';
+import { genId, type AiResult, type AiStatus } from '../utils/task';
+import { getPlatform, type ReplyMessage } from '../lib/platform';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
-// 用 sync 存储：自动发送开关跨设备同步，避免 Win/Mac 行为不一致
-const AUTO_SEND_KEY = 'sync:autoSend';
+
+/** 面板默认宽度：回答为多卡并排，需足够宽（与桌面端多聊并排一致） */
+const PANEL_WIDTH = 880;
 
 interface FloatingPanelProps {
-  text: string;
+  /** 预填的问题（如划词文本）；为空 = 空白新话题，由用户输入后手动发送 */
+  initialText?: string;
   onClose: () => void;
   position?: { left: number; top: number };
 }
 
-type PanelView = 'select' | 'result';
+/** 面板内的一轮问答：乐观追加；taskId 绑定后由回复流驱动更新 */
+interface PanelTurn {
+  id: string;
+  question: string;
+  /** 后台任务 id；AI_SENDING/REPLY/AI_REPLY_DONE 按此归位到轮次 */
+  taskId?: string;
+  results: Record<string, AiResult>;
+}
 
 export default function FloatingPanel({
-  text,
+  initialText = '',
   onClose,
   position,
 }: FloatingPanelProps) {
   const [aiConfigs, setAiConfigs] = useState<AiConfig[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [view, setView] = useState<PanelView>('select');
-  const [showAfterSend, setShowAfterSend] = useState(true);
-  const [autoSend, setAutoSend] = useState(false);
-  const [followUp, setFollowUp] = useState('');
-  const [task, setTask] = useState<AskTask | null>(null);
+  /** 输入框内容（initialText 预填，可编辑） */
+  const [draft, setDraft] = useState(initialText);
+  /** 会话轮次（面板存续期内本地维护；历史落盘由 background 负责） */
+  const [turns, setTurns] = useState<PanelTurn[]>([]);
   const [logoFailed, setLogoFailed] = useState(false);
-  const [pinned, setPinned] = useState(false);
+  // 默认钉在页面上：点击面板外部不自动关闭
+  const [pinned, setPinned] = useState(true);
   const [minimized, setMinimized] = useState(false);
-  const sentRef = useRef(false);
+  /** AI 选择浮层展开态 */
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   // 将「固定/收起」状态同步给 content script：
-  // 固定或收起到小浮窗时，点击面板外部不应自动关闭面板
+  // 固定或收起到右下角小浮窗时，点击面板外部不应自动关闭面板
   useEffect(() => {
     window.dispatchEvent(
       new CustomEvent('askall-panel-state', {
@@ -45,7 +65,9 @@ export default function FloatingPanel({
   }, [pinned, minimized]);
 
   // 拖拽位置 & 四边调整大小
-  const [pos, setPos] = useState(position ?? { left: 100, top: 100 });
+  const [pos, setPos] = useState(position ?? { left: window.innerWidth - PANEL_WIDTH - 16, top: 56 });
+  /** 是否贴右显示（默认右侧白色卡片，与应用右侧内容区一致；拖拽后自由定位） */
+  const [docked, setDocked] = useState(true);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const dragRef = useRef<{
     type: 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null;
@@ -91,6 +113,7 @@ export default function FloatingPanel({
       const dy = e.clientY - d.startY;
 
       if (d.type === 'move') {
+        setDocked(false);
         setPos({
           left: Math.max(0, Math.min(d.origLeft + dx, window.innerWidth - 60)),
           top: Math.max(0, Math.min(d.origTop + dy, window.innerHeight - 40)),
@@ -128,9 +151,9 @@ export default function FloatingPanel({
     };
   }, []);
 
+  // 加载 AI 配置：合并默认项；默认勾选启用项（或遵循 selectAllByDefault 偏好）
   useEffect(() => {
     getPlatform().storage.getItem(AI_CONFIGS_KEY).then((data) => {
-      // 合并默认配置：确保所有未禁用的默认 Chat 都展示
       const stored = data as AiConfig[] | null;
       const configs = mergeConfigs(stored);
       setAiConfigs(configs);
@@ -143,71 +166,125 @@ export default function FloatingPanel({
         );
       });
     });
-    getPlatform().storage.getItem('local:showResultAfterSend').then((v) => {
-      if (typeof v === 'boolean') setShowAfterSend(v);
-    });
-    getPlatform().storage.getItem(AUTO_SEND_KEY).then((v) => {
-      const val = typeof v === 'boolean' ? v : false;
-      setAutoSend(val);
-      // 视图由自动发送开关决定：开启→直接进结果面板；关闭→显示选择面板
-      setView(val ? 'result' : 'select');
-    });
   }, []);
 
-  // 自动发送：开启时直接向所有启用的 AI 发送，并展示第二个面板（结果面板）
-  useEffect(() => {
-    if (!autoSend || sentRef.current || aiConfigs.length === 0) return;
-    const enabled = aiConfigs.filter((ai) => ai.enabled && ai.url);
-    if (enabled.length === 0) return;
-    sentRef.current = true;
-    getPlatform()
-      .ask.ask(text, enabled.map((ai) => ai.id))
-      .catch(() => {});
-    setView('result');
-  }, [autoSend, aiConfigs]);
-
-  // 结果面板：先拉一次当前任务，再订阅各 AI 回复进度实时更新
-  useEffect(() => {
-    if (view !== 'result') return;
-    getPlatform()
-      .ask.getTask()
-      .then(({ task }) => setTask(task))
-      .catch(() => {});
-    const applyReply = (msg: import('../lib/platform').ReplyMessage) => {
-      setTask((prev) => {
-        if (!prev || msg.taskId !== prev.id) return prev;
-        const result = prev.results[msg.aiId];
-        if (!result) return prev;
-        const patch: Partial<AiResult> = {};
-        if (msg.type === 'AI_SENDING') patch.status = 'sending';
-        else if (msg.type === 'AI_REPLY') {
-          patch.status = 'streaming';
-          patch.answer = msg.text;
-        } else if (msg.type === 'AI_REPLY_DONE') {
-          patch.status = 'done';
-          patch.answer = msg.text;
-        }
-        return {
-          ...prev,
-          results: {
-            ...prev.results,
-            [msg.aiId]: { ...result, ...patch },
-          },
-        };
+  // 会话轮次与回复流：turnsRef 与 turns 严格同步（在 updater 内写入），
+  // 供回复流判断「taskId 是否已绑定」；未绑定的回复先暂存，绑定后并入对应轮次。
+  const turnsRef = useRef<PanelTurn[]>([]);
+  const pendingByTaskRef = useRef(new Map<string, Record<string, AiResult>>());
+  const updateTurns = useCallback(
+    (updater: (prev: PanelTurn[]) => PanelTurn[]) => {
+      setTurns((prev) => {
+        const next = updater(prev);
+        turnsRef.current = next;
+        return next;
       });
-    };
-    const unsub = getPlatform().ask.onReply(applyReply);
-    return unsub;
-  }, [view]);
+    },
+    [],
+  );
 
-  const toggleAutoSend = async (checked: boolean) => {
-    await getPlatform().storage.setItem(AUTO_SEND_KEY, checked);
-    setAutoSend(checked);
-    // 关闭自动发送时回到选择面板，避免停留在结果面板
-    if (!checked) {
-      setView('select');
+  // 订阅回复流（唯一实时数据入口）：AI_REPLY/AI_REPLY_DONE 均为全量文本，替换而非追加
+  useEffect(() => {
+    const apply = (msg: ReplyMessage) => {
+      const patch: Partial<AiResult> =
+        msg.type === 'AI_SENDING'
+          ? { status: 'sending' }
+          : msg.type === 'AI_REPLY'
+            ? {
+                status: 'streaming',
+                answer: msg.text,
+                ...(msg.url ? { url: msg.url } : {}),
+              }
+            : {
+                status: 'done',
+                answer: msg.text,
+                ...(msg.url ? { url: msg.url } : {}),
+              };
+      const mergeInto = (base?: AiResult): AiResult => ({
+        aiId: msg.aiId,
+        aiName: msg.aiName,
+        status: 'opening',
+        answer: '',
+        ...base,
+        ...patch,
+      });
+
+      if (!turnsRef.current.some((t) => t.taskId === msg.taskId)) {
+        // 轮次尚未绑定 taskId（getTask 轮询间隙到达）：暂存，bindTask 时并入
+        const stashed = pendingByTaskRef.current.get(msg.taskId) ?? {};
+        pendingByTaskRef.current.set(msg.taskId, {
+          ...stashed,
+          [msg.aiId]: mergeInto(stashed[msg.aiId]),
+        });
+        return;
+      }
+      updateTurns((prev) =>
+        prev.map((t) => {
+          if (t.taskId !== msg.taskId) return t;
+          return {
+            ...t,
+            results: {
+              ...t.results,
+              [msg.aiId]: mergeInto(t.results[msg.aiId]),
+            },
+          };
+        }),
+      );
+    };
+    return getPlatform().ask.onReply(apply);
+  }, [updateTurns]);
+
+  // 绑定后台任务：ask/followUp 立即返回，任务由 background 异步创建。
+  // 以「发起时间 + 问题文本」双重校验，避免把上一轮的旧任务错绑到本轮。
+  const bindTask = async (
+    turnId: string,
+    question: string,
+    dispatchedAt: number,
+  ) => {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        const { task } = await getPlatform().ask.getTask();
+        if (
+          task &&
+          task.createdAt >= dispatchedAt - 1000 &&
+          task.question === question
+        ) {
+          const stashed = pendingByTaskRef.current.get(task.id);
+          pendingByTaskRef.current.delete(task.id);
+          updateTurns((prev) =>
+            prev.map((t) => {
+              if (t.id !== turnId) return t;
+              // 后台任务快照覆盖乐观 opening；暂存的运行时回复（更实时）最后覆盖
+              return {
+                ...t,
+                taskId: task.id,
+                results: { ...t.results, ...task.results, ...(stashed ?? {}) },
+              };
+            }),
+          );
+          return;
+        }
+      } catch {
+        /* 后台未就绪，重试 */
+      }
+      await new Promise((r) => setTimeout(r, 200));
     }
   };
+
+  // 有新轮次/新回复时把会话区滚到底部。
+  // 直接设 scrollTop 而非 scrollIntoView：后者会连带滚动宿主网页。
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const liveSignature = turns
+    .map((t) =>
+      Object.values(t.results)
+        .map((r) => `${r.status}:${r.answer.length}`)
+        .join('|'),
+    )
+    .join('#');
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [liveSignature, turns.length]);
 
   const toggleAi = (id: string) => {
     setSelectedIds((prev) => {
@@ -223,26 +300,63 @@ export default function FloatingPanel({
     [aiConfigs, selectedIds],
   );
 
+  const enabledList = useMemo(
+    () => aiConfigs.filter((ai) => ai.enabled && ai.url),
+    [aiConfigs],
+  );
+
+  /** 发送：乐观追加轮次并派发；首次为新会话提问，其后为追问已打开的聊天窗口 */
   const handleSend = () => {
-    if (selectedList.length === 0) return;
-    if (sentRef.current) return;
-    sentRef.current = true;
+    const q = draft.trim();
+    const aiIds = selectedList.map((ai) => ai.id);
+    if (!q || aiIds.length === 0) return;
 
-    getPlatform()
-      .ask.ask(text, selectedList.map((ai) => ai.id))
-      .catch(() => {});
+    const turn: PanelTurn = {
+      id: genId(),
+      question: q,
+      results: Object.fromEntries(
+        selectedList.map((ai): [string, AiResult] => [
+          ai.id,
+          { aiId: ai.id, aiName: ai.name, status: 'opening', answer: '' },
+        ]),
+      ),
+    };
+    // turnsRef 此刻仍是发送前状态：长度 > 0 = 会话内已有轮次 → 追问
+    const isFollowUp = turnsRef.current.length > 0;
+    updateTurns((prev) => [...prev, turn]);
+    setDraft('');
 
-    if (showAfterSend) {
-      setView('result');
-    } else {
-      onClose();
+    const dispatchedAt = Date.now();
+    const platform = getPlatform();
+    const dispatch = isFollowUp
+      ? platform.ask.followUp(q, aiIds)
+      : platform.ask.ask(q, aiIds);
+    dispatch.catch(() => {});
+    void bindTask(turn.id, q, dispatchedAt);
+  };
+
+  /** 该 AI 的提问直达链接（{query} 模板以该轮问题填充） */
+  const buildUrlFor = (aiId: string, question: string) => {
+    const conf = aiConfigs.find((c) => c.id === aiId);
+    if (!conf) return '';
+    if (conf.url.includes('{query}')) {
+      return conf.url.replace(/\{query\}/g, encodeURIComponent(question));
     }
+    return conf.url;
   };
 
-  // 查看原文：让平台切换到该 AI 已打开的聊天窗口，找不到才新开
-  const openAiTab = (ai: AiConfig) => {
-    getPlatform().ask.openAiTab(buildUrl(ai)).catch(() => {});
-  };
+  // AI 选择浮层：点击面板内浮层之外关闭
+  const pickerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [pickerOpen]);
 
   const togglePinned = () => setPinned((p) => !p);
 
@@ -250,39 +364,13 @@ export default function FloatingPanel({
     getPlatform().window.openSettings().catch(() => {});
   };
 
-  // 在结果面板手动输入新的问题，直接向已打开的聊天窗口发送，不新建标签页/弹窗
-  const handleFollowUpSend = () => {
-    const q = followUp.trim();
-    if (!q || selectedList.length === 0) return;
-    getPlatform()
-      .ask.followUp(q, selectedList.map((ai) => ai.id))
-      .catch(() => {});
-    setFollowUp('');
-  };
-
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
-      // 未勾选任何平台时回车失效，不允许发送
-      if (e.key === 'Enter' && view === 'select' && selectedList.length > 0) {
-        handleSend();
-      }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [view, selectedList, showAfterSend]);
-
-  const enabledList = useMemo(
-    () => aiConfigs.filter((ai) => ai.enabled && ai.url),
-    [aiConfigs],
-  );
-
-  const buildUrl = (ai: AiConfig) => {
-    if (ai.url.includes('{query}')) {
-      return ai.url.replace(/\{query\}/g, encodeURIComponent(text));
-    }
-    return ai.url;
-  };
+  }, [onClose]);
 
   return (
     <div style={styles.overlay} onClick={(e) => e.stopPropagation()}>
@@ -311,9 +399,12 @@ export default function FloatingPanel({
         ref={cardRef}
         style={{
           ...styles.card,
-          left: pos.left,
-          top: pos.top,
-          ...(view === 'result' ? { width: 560 } : {}),
+          // 默认贴右侧白色卡片；拖拽后转为 left 自由定位
+          ...(docked ? { right: 16 } : { left: pos.left }),
+          top: docked ? 56 : pos.top,
+          width: `min(${PANEL_WIDTH}px, calc(100vw - 32px))`,
+          height: 'min(560px, calc(100vh - 72px))',
+          maxHeight: 'calc(100vh - 72px)',
           ...(size.width ? { width: size.width } : {}),
           ...(size.height ? { height: size.height } : {}),
         }}
@@ -333,6 +424,19 @@ export default function FloatingPanel({
               />
             )}
             <span>齐问</span>
+            <button
+              type="button"
+              style={styles.iconBtn}
+              onClick={(e) => {
+                e.stopPropagation();
+                openSettings();
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+              aria-label="设置"
+              title="设置"
+            >
+              <Settings style={{ width: 14, height: 14 }} />
+            </button>
           </div>
           <div style={styles.headerActions}>
             <button
@@ -373,181 +477,174 @@ export default function FloatingPanel({
           </div>
         </div>
 
-        {/* 中间内容区：可滚动 */}
-        <div style={styles.body}>
-        {view === 'select' ? (
-          <>
-            <div style={styles.countRow}>
-              <span style={styles.countText}>
-                已选择 {selectedList.length}/{enabledList.length}
-              </span>
-              <label style={styles.autoSendLabel} title="开启后划词自动发送并直接展示结果面板">
-                <span style={styles.autoSendText}>自动发送</span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={autoSend}
-                  onClick={() => toggleAutoSend(!autoSend)}
-                  style={{
-                    ...styles.switchTrack,
-                    ...(autoSend ? styles.switchTrackOn : {}),
-                  }}
-                >
-                  <span
-                    style={{
-                      ...styles.switchThumb,
-                      ...(autoSend ? styles.switchThumbOn : {}),
-                    }}
-                  />
-                </button>
-              </label>
-            </div>
-            <div style={styles.list}>
-              {enabledList.map((ai) => {
-                const selected = selectedIds.has(ai.id);
-                return (
-                  <label
-                    key={ai.id}
-                    className="askall-item"
-                    onClick={() => toggleAi(ai.id)}
-                    style={{
-                      ...styles.item,
-                      ...(selected ? styles.itemSelected : {}),
-                    }}
-                  >
-                    <span style={styles.aiName}>
-                      <span
-                        style={{
-                          ...styles.aiIcon,
-                          ...(selected ? styles.aiIconSelected : {}),
-                        }}
-                      >
-                        <AiIcon ai={ai} />
-                      </span>
-                      {ai.name}
-                    </span>
-                    <span
-                      className="askall-checkbox"
-                      style={{
-                        ...styles.checkbox,
-                        ...(selected ? styles.checkboxSelected : {}),
-                      }}
-                    >
-                      {selected && <span style={styles.checkmark}>✓</span>}
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          </>
-        ) : (
-          <>
-            <div style={styles.questionBox}>
-              <div style={styles.questionLabel}>我的问题</div>
-              <div style={styles.questionText}>{text}</div>
-            </div>
-            <div style={styles.resultHeader}>
-              <span style={styles.resultTitle}>全部回答</span>
-            </div>
-            <div style={styles.resultList}>
-              {selectedList.map((ai) => {
-                const result = task?.results?.[ai.id];
-                const reply = result?.answer || '';
-                const status = result?.status;
-                return (
-                  <div key={ai.id} style={styles.resultItem}>
-                    <div style={styles.resultName}>
-                      <span style={styles.aiIcon}><AiIcon ai={ai} /></span>
-                      {ai.name}
-                      <StatusBadge status={status} />
-                      <a
-                        href={buildUrl(ai)}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          openAiTab(ai);
-                        }}
-                        style={styles.resultLink}
-                      >
-                        查看原文
-                      </a>
-                    </div>
-                    {reply ? (
-                      <div style={styles.resultText}>{reply}</div>
-                    ) : (
-                      <div style={styles.resultStatus}>
-                        {statusText(status)}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-        </div>
-
-        {/* 底部栏：发送/输入 */}
-        <div style={styles.footer}>
-          {view === 'select' ? (
-            <div style={styles.selectFooter}>
-              <button
-                type="button"
-                style={{
-                  ...styles.sendBtn,
-                  width: '100%',
-                  ...(selectedList.length === 0
-                    ? styles.sendBtnDisabled
-                    : {}),
-                }}
-                onClick={handleSend}
-                disabled={selectedList.length === 0}
-              >
-                开始提问
-              </button>
-              <div style={styles.footerHint}>按 Enter 发送 · Esc 关闭</div>
+        {/* 会话区：多轮问答（问题气泡 + 各 AI 回答卡），随回复流式更新 */}
+        <div style={styles.body} ref={bodyRef}>
+          {turns.length === 0 ? (
+            <div style={styles.emptyState}>
+              {logoFailed ? (
+                <span style={styles.emptyLogoFallback}>齐</span>
+              ) : (
+                <img
+                  src={getPlatform().assets.assetUrl('icon/128.png')}
+                  alt="AskAll 齐问"
+                  className="askall-logo-img"
+                  style={styles.emptyLogo}
+                  onError={() => setLogoFailed(true)}
+                />
+              )}
+              <div style={styles.emptyTitle}>AskAll 齐问</div>
+              <div style={styles.emptyDesc}>
+                一个问题，同时问多个 AI。
+                <br />
+                输入问题并发送，回答将直接显示在这里。
+              </div>
             </div>
           ) : (
-            <>
-              <input
-                value={followUp}
-                onChange={(e) => setFollowUp(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleFollowUpSend();
-                }}
-                placeholder="输入追加问题，向已打开的聊天窗口发送…"
-                style={styles.footerInput}
-              />
-              <button
-                type="button"
-                style={styles.composeBtn}
-                onClick={handleFollowUpSend}
-                disabled={!followUp.trim()}
-              >
-                发送
-              </button>
-            </>
+            turns.map((turn) => {
+              const results = Object.values(turn.results);
+              return (
+                <div key={turn.id} style={styles.turnBlock}>
+                  {/* 问题气泡：右对齐（与应用一致） */}
+                  <div style={styles.turnQRow}>
+                    <div style={styles.turnBubble}>{turn.question}</div>
+                  </div>
+                  {/* 回答卡：多 AI 并排，单个 AI 时铺满整行 */}
+                  <div
+                    style={
+                      results.length > 1
+                        ? styles.turnGrid
+                        : { ...styles.turnGrid, gridTemplateColumns: '1fr' }
+                    }
+                  >
+                    {results.map((r) => {
+                      const link = r.url || buildUrlFor(r.aiId, turn.question);
+                      return (
+                        <div key={r.aiId} style={styles.cell}>
+                          <div style={styles.cellHeader}>
+                            <span style={styles.aiIcon}>
+                              <AiIcon ai={{ id: r.aiId, name: r.aiName }} />
+                            </span>
+                            <span style={styles.cellName}>{r.aiName}</span>
+                            <StatusBadge status={r.status} />
+                            <a
+                              href={link}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                if (link) openAiUrl(link);
+                              }}
+                              style={styles.resultLink}
+                            >
+                              查看原文
+                            </a>
+                          </div>
+                          <div style={styles.cellBody}>
+                            {r.answer ? (
+                              <div style={styles.resultText}>{r.answer}</div>
+                            ) : (
+                              <div style={styles.resultStatus}>
+                                {statusText(r.status)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
 
-        {/* 底部信息栏：插件名 / 版本 / 设置（仅结果面板展示） */}
-        {view === 'result' && (
-          <div style={styles.infoBar}>
-            <span style={styles.infoName}>齐问</span>
-            <span style={styles.infoVersion}>
-              v{getPlatform().app.getVersion()}
-            </span>
+        {/* 底部 Composer：单个圆角框，内含输入区 + 底部操作条（AI 选择 + 发送），无分隔线 */}
+        <div style={styles.footer}>
+          <div style={styles.composerBox}>
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter 发送（Shift+Enter 换行）；输入法组合中的 Enter 不发送
+                if (
+                  e.key === 'Enter' &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing
+                ) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder="输入问题，同时问多个 AI…"
+              rows={2}
+              autoFocus
+              style={styles.composerInput}
+            />
+            <div style={styles.composerBar}>
+            <div ref={pickerRef} style={{ position: 'relative' }}>
+              <button
+                type="button"
+                onClick={() => setPickerOpen((v) => !v)}
+                title="选择发送给哪些 AI"
+                style={styles.pickerBtn}
+              >
+                <Bot style={{ width: 14, height: 14 }} />
+                已选 {selectedList.length} 个 AI
+                <ChevronDown
+                  style={{
+                    width: 12,
+                    height: 12,
+                    transform: pickerOpen ? 'rotate(180deg)' : 'none',
+                  }}
+                />
+              </button>
+              {pickerOpen && (
+                <div style={styles.pickerMenu}>
+                  {enabledList.map((ai) => {
+                    const selected = selectedIds.has(ai.id);
+                    return (
+                      <div
+                        key={ai.id}
+                        className="askall-item"
+                        onClick={() => toggleAi(ai.id)}
+                        style={styles.pickerItem}
+                      >
+                        <span style={styles.aiName}>
+                          <span style={styles.aiIcon}>
+                            <AiIcon ai={ai} />
+                          </span>
+                          {ai.name}
+                        </span>
+                        <span
+                          className="askall-checkbox"
+                          style={{
+                            ...styles.checkbox,
+                            ...(selected ? styles.checkboxSelected : {}),
+                          }}
+                        >
+                          {selected && <span style={styles.checkmark}>✓</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <span style={styles.footerHint}>Enter 发送 · Shift+Enter 换行</span>
             <button
               type="button"
-              style={styles.infoSettingsBtn}
-              onClick={openSettings}
-              aria-label="设置"
-              title="设置"
+              style={{
+                ...styles.sendBtn,
+                ...(draft.trim() && selectedList.length > 0
+                  ? {}
+                  : styles.sendBtnDisabled),
+              }}
+              onClick={handleSend}
+              disabled={!draft.trim() || selectedList.length === 0}
             >
-              <Settings style={{ width: 14, height: 14 }} />
-              设置
+              发送
             </button>
+            </div>
           </div>
-        )}
+        </div>
 
         {/* 四边 + 四角拖拽缩放 */}
         <div style={styles.resizeN} onMouseDown={(e) => startDrag('n', e)} />
@@ -564,6 +661,11 @@ export default function FloatingPanel({
   );
 }
 
+/** 查看原文：让平台切换到该 AI 已打开的聊天窗口，找不到才新开 */
+function openAiUrl(url: string) {
+  getPlatform().ask.openAiTab(url).catch(() => {});
+}
+
 /** 内置 AI 图标资源映射（public/ai 下），key 为内置平台的 id */
 const AI_ICON_FILES: Record<string, string> = {
   deepseek: 'deepseek.svg',
@@ -573,7 +675,7 @@ const AI_ICON_FILES: Record<string, string> = {
 };
 
 /** 渲染单个 AI 图标：优先使用 public/ai 下的官方图标，加载失败则回退到品牌色徽标 */
-function AiIcon({ ai }: { ai: AiConfig }) {
+function AiIcon({ ai }: { ai: Pick<AiConfig, 'id' | 'name'> }) {
   const [failed, setFailed] = useState(false);
   const file = AI_ICON_FILES[ai.id];
 
@@ -725,7 +827,6 @@ const styles: Record<string, React.CSSProperties> = {
   card: {
     position: 'fixed',
     zIndex: 2147483647,
-    width: 280,
     background: 'hsl(0 0% 100%)',
     borderRadius: 8,
     border: '1px solid hsl(220 13% 91%)',
@@ -761,82 +862,271 @@ const styles: Record<string, React.CSSProperties> = {
   },
   body: {
     flex: 1,
+    minHeight: 0,
     overflowY: 'auto',
     display: 'flex',
     flexDirection: 'column',
-    gap: 10,
-    minHeight: 0,
-    // 默认（未手动缩放）时限制最大高度，避免面板超出视口；缩放增高后列表可随 body 一起增高
-    maxHeight: 'calc(100vh - 160px)',
+    gap: 12,
+    padding: '2px 2px 8px',
   },
+  // 空态：品牌区 + 引导文案（与应用 EmptyState 一致的语气）
+  emptyState: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    textAlign: 'center',
+    padding: 24,
+  },
+  emptyLogo: {
+    width: 48,
+    height: 48,
+    objectFit: 'contain',
+    display: 'block',
+    border: 'none',
+    outline: 'none',
+    boxShadow: 'none',
+  },
+  emptyLogoFallback: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    background: 'hsl(221.2 83.2% 53.3%)',
+    color: 'hsl(210 40% 98%)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 22,
+    fontWeight: 700,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: 600,
+  },
+  emptyDesc: {
+    fontSize: 12,
+    color: 'hsl(220 8.9% 46.1%)',
+    maxWidth: 320,
+    lineHeight: 1.6,
+  },
+  // 一轮问答：问题气泡（右对齐）+ 回答卡网格
+  turnBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+  turnQRow: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+  },
+  turnBubble: {
+    maxWidth: '75%',
+    background: '#eeeeee',
+    borderRadius: 12,
+    padding: '8px 12px',
+    fontSize: 13,
+    lineHeight: 1.6,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    color: 'hsl(224 71.4% 4.1%)',
+  },
+  turnGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: 8,
+  },
+  // 回答卡：顶部标题栏 + 可滚动回答内容（超高时卡片内部滚动，时间线保持紧凑）
+  cell: {
+    display: 'flex',
+    flexDirection: 'column',
+    minHeight: 0,
+    overflow: 'hidden',
+    borderRadius: 10,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(0 0% 100%)',
+  },
+  cellHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    height: 30,
+    padding: '0 8px',
+    borderBottom: '1px solid hsl(220 13% 91%)',
+    flexShrink: 0,
+  },
+  cellName: {
+    minWidth: 0,
+    flex: 1,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'hsl(224 71.4% 4.1%)',
+  },
+  cellBody: {
+    padding: '8px 10px',
+    overflowY: 'auto',
+    maxHeight: 320,
+  },
+  resultLink: {
+    marginLeft: 'auto',
+    fontSize: 12,
+    fontWeight: 500,
+    color: 'hsl(221.2 83.2% 53.3%)',
+    textDecoration: 'none',
+    flexShrink: 0,
+  },
+  resultText: {
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: 'hsl(224 71.4% 4.1%)',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+  },
+  resultStatus: {
+    fontSize: 12,
+    color: 'hsl(220 8.9% 46.1%)',
+  },
+  // 底部 Composer
   footer: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    flexShrink: 0,
+    paddingTop: 10,
+    marginTop: 4,
+  },
+  // 单个圆角框：输入区 + 底部操作条同框，无分隔线（与桌面端 Composer 一致）
+  composerBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    borderRadius: 12,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(0 0% 100%)',
+    padding: '8px 10px 8px',
+    boxSizing: 'border-box' as const,
+  },
+  composerInput: {
+    width: '100%',
+    boxSizing: 'border-box',
+    minHeight: 40,
+    maxHeight: 140,
+    resize: 'none',
+    padding: 0,
+    border: 'none',
+    background: 'transparent',
+    fontSize: 13,
+    lineHeight: 1.5,
+    fontFamily: 'inherit',
+    color: 'hsl(224 71.4% 4.1%)',
+    outline: 'none',
+  },
+  composerBar: {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    flexShrink: 0,
-    paddingTop: 10,
-    marginTop: 10,
+    marginTop: 6,
   },
-  // 灰色背景铺满卡片底部一行；无分割线
-  infoBar: {
+  pickerBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    padding: '5px 9px',
+    borderRadius: 8,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(220 14.3% 95.9%)',
+    fontSize: 12,
+    color: 'hsl(224 71.4% 4.1%)',
+    cursor: 'pointer',
+    flexShrink: 0,
+    fontFamily: 'inherit',
+  },
+  pickerMenu: {
+    position: 'absolute',
+    bottom: 'calc(100% + 6px)',
+    left: 0,
+    zIndex: 1,
+    minWidth: 220,
+    maxHeight: 260,
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+    background: 'hsl(0 0% 100%)',
+    border: '1px solid hsl(220 13% 91%)',
+    borderRadius: 10,
+    padding: 4,
+    boxShadow: '0 10px 20px -2px rgba(0,0,0,0.12)',
+  },
+  pickerItem: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
-    flexShrink: 0,
-    marginTop: 10,
-    marginLeft: -12,
-    marginRight: -12,
-    marginBottom: -12,
-    padding: '8px 12px',
-    background: 'hsl(220 14.3% 95.9%)',
+    padding: '7px 8px',
+    borderRadius: 8,
+    fontSize: 13,
   },
-  infoName: {
-    fontSize: 12,
-    fontWeight: 400,
-    color: 'hsl(224 71.4% 4.1%)',
-  },
-  infoVersion: {
-    fontSize: 11,
-    color: 'hsl(220 8.9% 46.1% / 0.8)',
-  },
-  infoSettingsBtn: {
+  aiName: {
+    fontSize: 13,
     display: 'flex',
     alignItems: 'center',
-    gap: 4,
-    background: 'transparent',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: 12,
-    color: 'hsl(220 8.9% 46.1%)',
-    padding: '3px 6px',
-    borderRadius: 6,
-  },
-  selectFooter: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'stretch',
     gap: 6,
-    width: '100%',
+    color: 'hsl(224 71.4% 4.1%)',
+  },
+  aiIcon: {
+    fontSize: 13,
+    lineHeight: 1,
+    display: 'flex',
+    alignItems: 'center',
+  },
+  checkbox: {
+    width: 16,
+    height: 16,
+    borderRadius: 4,
+    border: '1px solid hsl(220 13% 91%)',
+    background: 'hsl(0 0% 100%)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  checkboxSelected: {
+    borderColor: 'hsl(221.2 83.2% 53.3%)',
+    background: 'hsl(221.2 83.2% 53.3%)',
+  },
+  checkmark: {
+    fontSize: 10,
+    lineHeight: 1,
+    color: 'hsl(210 40% 98%)',
+    fontWeight: 700,
   },
   footerHint: {
     fontSize: 11,
     color: 'hsl(220 8.9% 46.1% / 0.7)',
-    textAlign: 'center',
     userSelect: 'none',
-    lineHeight: 1.4,
+    marginLeft: 'auto',
   },
-  footerInput: {
-    flex: 1,
-    minWidth: 0,
-    height: 34,
-    padding: '0 10px',
+  sendBtn: {
+    padding: '0 16px',
+    height: 30,
     borderRadius: 8,
-    border: '1px solid hsl(220 13% 91%)',
-    background: 'hsl(0 0% 100%)',
+    border: 'none',
+    background: 'hsl(221.2 83.2% 53.3%)',
+    color: 'hsl(210 40% 98%)',
     fontSize: 13,
-    color: 'hsl(224 71.4% 4.1%)',
-    outline: 'none',
+    fontWeight: 500,
+    cursor: 'pointer',
+    transition: 'background 0.15s',
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
+  },
+  sendBtnDisabled: {
+    background: 'hsl(220 14.3% 95.9%)',
+    color: 'hsl(220 8.9% 46.1% / 0.55)',
+    cursor: 'not-allowed',
   },
   title: {
     display: 'flex',
@@ -913,250 +1203,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 6,
     lineHeight: 1,
     color: 'hsl(220 8.9% 46.1%)',
-  },
-  countRow: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  countText: {
-    fontSize: 12,
-    color: 'hsl(220 8.9% 46.1%)',
-  },
-  autoSendLabel: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    cursor: 'pointer',
-  },
-  autoSendText: {
-    fontSize: 12,
-    color: 'hsl(220 8.9% 46.1%)',
-  },
-  switchTrack: {
-    width: 30,
-    height: 18,
-    borderRadius: 999,
-    border: '1px solid hsl(220 13% 91%)',
-    background: 'hsl(220 14.3% 95.9%)',
-    padding: 0,
-    position: 'relative',
-    cursor: 'pointer',
-    transition: 'background 0.15s',
-  },
-  switchTrackOn: {
-    background: 'hsl(221.2 83.2% 53.3%)',
-    borderColor: 'hsl(221.2 83.2% 53.3%)',
-  },
-  switchThumb: {
-    position: 'absolute',
-    top: 1,
-    left: 1,
-    width: 14,
-    height: 14,
-    borderRadius: '50%',
-    background: '#fff',
-    boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
-    transition: 'left 0.15s',
-  },
-  switchThumbOn: {
-    left: 13,
-  },
-  list: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-    // 占据 body 剩余空间：面板增高时 AI 平台列表随之增高，超高时内部滚动
-    flex: 1,
-    minHeight: 0,
-    overflowY: 'auto',
-  },
-  item: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '8px 6px',
-    borderRadius: 8,
-    transition: 'background 0.15s',
-  },
-  itemSelected: {
-    background: 'hsl(221.2 83.2% 53.3% / 0.08)',
-  },
-  aiName: {
-    fontSize: 14,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    color: 'hsl(224 71.4% 4.1%)',
-  },
-  aiIcon: {
-    fontSize: 13,
-    lineHeight: 1,
-    display: 'flex',
-    alignItems: 'center',
-  },
-  aiIconSelected: {
-    filter: 'none',
-    opacity: 1,
-  },
-  checkbox: {
-    width: 16,
-    height: 16,
-    borderRadius: 4,
-    border: '1px solid hsl(220 13% 91%)',
-    background: 'hsl(0 0% 100%)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  checkboxSelected: {
-    borderColor: 'hsl(221.2 83.2% 53.3%)',
-    background: 'hsl(221.2 83.2% 53.3%)',
-  },
-  checkmark: {
-    fontSize: 10,
-    lineHeight: 1,
-    color: 'hsl(210 40% 98%)',
-    fontWeight: 700,
-  },
-  sendBtn: {
-    padding: '0 16px',
-    height: 34,
-    borderRadius: 8,
-    border: 'none',
-    background: 'hsl(221.2 83.2% 53.3%)',
-    color: 'hsl(210 40% 98%)',
-    fontSize: 14,
-    fontWeight: 500,
-    cursor: 'pointer',
-    transition: 'background 0.15s',
-    flexShrink: 0,
-    whiteSpace: 'nowrap',
-  },
-  sendBtnDisabled: {
-    background: 'hsl(220 14.3% 95.9%)',
-    color: 'hsl(220 8.9% 46.1% / 0.55)',
-    cursor: 'not-allowed',
-  },
-  hint: {
-    textAlign: 'center',
-    fontSize: 12,
-    color: 'hsl(220 8.9% 46.1%)',
-  },
-  composeBox: {
-    display: 'flex',
-    gap: 8,
-  },
-  composeInput: {
-    flex: 1,
-    minWidth: 0,
-    height: 34,
-    padding: '0 10px',
-    borderRadius: 8,
-    border: '1px solid hsl(220 13% 91%)',
-    background: 'hsl(0 0% 100%)',
-    fontSize: 13,
-    color: 'hsl(224 71.4% 4.1%)',
-    outline: 'none',
-  },
-  composeBtn: {
-    height: 34,
-    padding: '0 14px',
-    borderRadius: 8,
-    border: 'none',
-    background: 'hsl(221.2 83.2% 53.3%)',
-    color: 'hsl(210 40% 98%)',
-    fontSize: 13,
-    fontWeight: 500,
-    cursor: 'pointer',
-    flexShrink: 0,
-  },
-  questionBox: {
-    background: 'hsl(221.2 83.2% 53.3% / 0.08)',
-    borderRadius: 8,
-    padding: 10,
-  },
-  questionLabel: {
-    fontSize: 12,
-    color: 'hsl(221.2 83.2% 53.3%)',
-    marginBottom: 4,
-  },
-  questionText: {
-    fontSize: 14,
-    lineHeight: 1.5,
-    wordBreak: 'break-word',
-    color: 'hsl(224 71.4% 4.1%)',
-  },
-  resultHeader: {
-    display: 'flex',
-    gap: 12,
-    borderBottom: '1px solid hsl(220 13% 91%)',
-    paddingBottom: 6,
-  },
-  resultTitle: {
-    fontSize: 13,
-    fontWeight: 600,
-    color: 'hsl(221.2 83.2% 53.3%)',
-  },
-  resultList: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-    // 占据 body 剩余空间，随面板高度自适应
-    flex: 1,
-    minHeight: 0,
-    overflowY: 'auto',
-  },
-  resultItem: {
-    display: 'block',
-    padding: 10,
-    borderRadius: 8,
-    border: '1px solid hsl(220 13% 91%)',
-    color: 'inherit',
-  },
-  resultName: {
-    fontWeight: 600,
-    fontSize: 14,
-    marginBottom: 4,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    color: 'hsl(224 71.4% 4.1%)',
-  },
-  resultLink: {
-    marginLeft: 'auto',
-    fontSize: 12,
-    fontWeight: 500,
-    color: 'hsl(221.2 83.2% 53.3%)',
-    textDecoration: 'none',
-  },
-  resultText: {
-    fontSize: 13,
-    lineHeight: 1.5,
-    color: 'hsl(224 71.4% 4.1%)',
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-    maxHeight: 160,
-    overflowY: 'auto',
-  },
-  resultStatus: {
-    fontSize: 12,
-    color: 'hsl(220 8.9% 46.1%)',
-  },
-  resultActions: {
-    display: 'flex',
-    gap: 8,
-  },
-  secondaryBtn: {
-    flex: 1,
-    padding: '9px 0',
-    borderRadius: 8,
-    border: '1px solid hsl(220 13% 91%)',
-    background: 'hsl(0 0% 100%)',
-    color: 'hsl(224 71.4% 4.1%)',
-    fontSize: 14,
-    cursor: 'pointer',
   },
   resizeN: {
     position: 'absolute',

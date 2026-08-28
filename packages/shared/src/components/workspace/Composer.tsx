@@ -1,15 +1,17 @@
 /**
  * Composer —— 统一输入组件（v1.1 新布局）。
  *
- * 极简形态：单个输入框 + 底部操作条。
- * 底部左侧是「AI 选择」按钮区（悬浮/点击弹出面板）：
- *   - 面板内每个厂商一行：左侧图标 + 名称，右侧勾选状态；
- *   - 点击行切换勾选，默认全勾选（enabled 项），选择持久化 local:lastSelectedAis。
+ * 极简形态：单个输入框 + 底部操作条（两者同处一个外框内）。
+ * 底部左侧是「AI 选择」下拉（Select 形态）：
+ *   - trigger 展示已选 AI 图标（最多 3 个，超出显示 +N），未选时显示占位「选择 AI」；
+ *   - 点击展开面板：每个厂商一行 = 左侧图标 + 名称，右侧勾选状态；
+ *   - 点击行切换勾选、面板不关闭（多选）；Esc / 点击外部关闭；默认全勾选（enabled 项），
+ *     选择持久化 local:lastSelectedAis。
  * 右侧为发送按钮；快捷键 ⌘/Ctrl+Enter 发送。
  * 外部注入的问题（pendingQuestion，OS 级划词等）自动预填并发送。
  * 支持受控/非受控两种文本模式，便于空态页与时间线底部复用。
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, Check, ChevronDown, Loader2, Send } from 'lucide-react';
 import { useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
@@ -49,41 +51,23 @@ export default function Composer({
     else setInner(v);
   };
 
-  // AI 选择面板：悬浮/点击展开
+  // AI 选择下拉：点击展开（Select 形态），Esc / 点击外部关闭
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
-  const openTimer = useRef<number | null>(null);
-  const closeTimer = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (openTimer.current) window.clearTimeout(openTimer.current);
-      if (closeTimer.current) window.clearTimeout(closeTimer.current);
-    },
-    [],
-  );
-  const hoverEnter = () => {
-    if (closeTimer.current) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = null;
-    }
-    openTimer.current = window.setTimeout(() => setPickerOpen(true), 150);
-  };
-  const hoverLeave = () => {
-    if (openTimer.current) {
-      window.clearTimeout(openTimer.current);
-      openTimer.current = null;
-    }
-    closeTimer.current = window.setTimeout(() => setPickerOpen(false), 200);
-  };
-
-  // 点击面板外部关闭
   useEffect(() => {
     if (!pickerOpen) return;
     const onDown = (e: MouseEvent) => {
       if (!pickerRef.current?.contains(e.target as Node)) setPickerOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPickerOpen(false);
+    };
     document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [pickerOpen]);
 
   // 外部问题注入：预填并自动发送（与旧 AskPanel 的 externalQuestion 行为一致）
@@ -109,7 +93,11 @@ export default function Composer({
     else void ask(t);
   };
 
-  const selectedCount = configs.filter((c) => selected.includes(c.id)).length;
+  const selectedAis = useMemo(
+    () => configs.filter((c) => selected.includes(c.id)),
+    [configs, selected],
+  );
+  const selectedCount = selectedAis.length;
 
   return (
     <div className="flex flex-col rounded-lg border bg-card shadow-sm">
@@ -128,25 +116,48 @@ export default function Composer({
         }}
       />
 
-      {/* 底部操作条：AI 选择按钮区 + 发送（与输入区同一外框、无分隔线，输入内容不会与操作条重叠） */}
+      {/* 底部操作条：AI 选择下拉 + 发送（与输入区同一外框、无分隔线） */}
       <div className="flex flex-wrap items-center gap-1.5 px-2.5 py-1.5">
-        <div
-          className="relative"
-          ref={pickerRef}
-          onMouseEnter={hoverEnter}
-          onMouseLeave={hoverLeave}
-        >
+        <div className="relative" ref={pickerRef}>
           <button
             type="button"
             onClick={() => setPickerOpen((v) => !v)}
-            title="选择发送给哪些 AI"
-            className="flex items-center gap-1.5 rounded-md border bg-secondary/60 px-2 py-1 text-xs text-secondary-foreground transition-colors hover:bg-accent"
+            aria-expanded={pickerOpen}
+            title="选择发送给哪些 AI（可多选）"
+            className={cn(
+              'flex h-7 max-w-[200px] items-center gap-1 rounded-md border px-1.5 text-xs transition-colors',
+              pickerOpen
+                ? 'border-primary/50 bg-accent text-accent-foreground'
+                : 'border-input bg-secondary/60 text-secondary-foreground hover:bg-accent hover:text-accent-foreground',
+            )}
           >
-            <Bot className="h-3.5 w-3.5" />
-            已选 {selectedCount} 个 AI
+            {selectedCount > 0 ? (
+              <span className="flex min-w-0 items-center">
+                <span className="flex items-center -space-x-1">
+                  {selectedAis.slice(0, 3).map((a) => (
+                    <span
+                      key={a.id}
+                      className="rounded-full bg-background ring-1 ring-border"
+                    >
+                      <AiIcon aiId={a.id} name={a.name} size={14} />
+                    </span>
+                  ))}
+                </span>
+                {selectedCount > 3 && (
+                  <span className="ml-1 shrink-0 rounded bg-muted px-1 text-[10px] leading-4 text-muted-foreground">
+                    +{selectedCount - 3}
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 px-0.5 text-muted-foreground">
+                <Bot className="h-3.5 w-3.5" />
+                选择 AI
+              </span>
+            )}
             <ChevronDown
               className={cn(
-                'h-3 w-3 transition-transform',
+                'h-3 w-3 shrink-0 transition-transform',
                 pickerOpen && 'rotate-180',
               )}
             />
@@ -154,6 +165,9 @@ export default function Composer({
 
           {pickerOpen && (
             <div className="absolute bottom-full left-0 z-20 mb-1 flex min-w-[200px] flex-col gap-0.5 rounded-md border bg-popover p-1 shadow-md">
+              <p className="px-2 pb-0.5 pt-1 text-[11px] font-medium text-muted-foreground">
+                选择发送目标（可多选）
+              </p>
               {configs.map((c) => {
                 const on = selected.includes(c.id);
                 return (
@@ -177,11 +191,9 @@ export default function Composer({
           )}
         </div>
 
-        <span className="ml-auto mr-1 text-[11px] text-muted-foreground">
-          ⌘/Ctrl+Enter 发送
-        </span>
         <Button
           size="sm"
+          className="ml-auto"
           onClick={() => submit()}
           disabled={sending || !text.trim() || selectedCount === 0}
         >

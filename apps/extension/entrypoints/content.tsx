@@ -35,15 +35,16 @@ export default defineContentScript({
         }
         if (matchesShortcut(e, shortcut)) {
           e.preventDefault();
-          openPanelForSelection();
+          // 有划词时预填问题；无划词时打开空白新话题面板
+          showPanel(window.getSelection()?.toString().trim() ?? '');
         }
       });
     });
 
-    // 右键菜单/其他入口调用：显示面板
+    // 右键菜单/其他入口调用：显示面板（text 为空 = 空白新话题面板）
     browser.runtime.onMessage.addListener((msg) => {
       if (msg?.type === 'SHOW_PANEL') {
-        openPanelForSelection(typeof msg.text === 'string' ? msg.text : undefined);
+        showPanel(typeof msg.text === 'string' ? msg.text.trim() : '');
       }
     });
 
@@ -62,26 +63,13 @@ export default defineContentScript({
     function onMouseUp(event: MouseEvent) {
       const target = event.target as Node;
       if (container && container.contains(target)) return;
-      openPanelForSelection();
-    }
-
-    /** 用当前选中文本（或显式传入的文本）打开面板，并紧贴选中文字定位 */
-    function openPanelForSelection(explicitText?: string) {
-      const selection = window.getSelection();
-      const text = (explicitText ?? selection?.toString() ?? '').trim();
+      // 划词自动弹出：仅在有选中文本时打开（预填问题），避免每次点击都弹空面板
+      const text = window.getSelection()?.toString().trim();
       if (!text) return;
-
-      const rect =
-        selection && selection.rangeCount > 0
-          ? selection.getRangeAt(0).getBoundingClientRect()
-          : null;
-      // 以选中文字包围矩形的下边中点作为锚点
-      const anchorX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
-      const anchorY = rect ? rect.bottom : window.innerHeight / 2;
-      showPanel(anchorX, anchorY, text);
+      showPanel(text);
     }
 
-    function showPanel(x: number, y: number, text: string) {
+    function showPanel(text: string) {
       if (!container) {
         container = document.createElement('div');
         container.id = 'askall-floating-panel-host';
@@ -97,22 +85,8 @@ export default defineContentScript({
         root = ReactDOM.createRoot(container);
       }
 
-      const panelWidth = 280;
-      const panelHeight = 380;
-      const gap = 8;
-      const left = Math.max(8, Math.min(x, window.innerWidth - panelWidth - 8));
-      const spaceBelow = window.innerHeight - (y + gap) - 8;
-      const top =
-        spaceBelow >= panelHeight
-          ? y + gap
-          : Math.max(8, y - panelHeight - gap);
-
       root?.render(
-        <FloatingPanel
-          text={text}
-          onClose={hidePanel}
-          position={{ left, top }}
-        />,
+        <FloatingPanel initialText={text} onClose={hidePanel} />,
       );
     }
 
@@ -126,8 +100,8 @@ export default defineContentScript({
     }
 
     // 面板「固定 / 收起」状态（由 FloatingPanel 通过自定义事件同步）：
-    // 固定或收起到右下角小浮窗时，点击面板外部不应自动关闭面板
-    let panelState = { pinned: false, minimized: false };
+    // 面板默认钉在页面上（pinned 初始为 true），点击面板外部不自动关闭
+    let panelState = { pinned: true, minimized: false };
     window.addEventListener(
       'askall-panel-state',
       ((

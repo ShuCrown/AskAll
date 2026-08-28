@@ -19,24 +19,31 @@ const MENU_ID = 'ask-multi-ai';
 export default defineBackground(() => {
   // 注入扩展平台实现：history.ts 等共享工具通过 getPlatform().storage 访问
   initExtensionPlatform();
-  // 初始化默认配置 + 右键菜单（仅在安装/更新时）
+  // 初始化默认配置（仅在安装/更新时）
   browser.runtime.onInstalled.addListener(async () => {
     const existing = await storage.getItem(AI_CONFIGS_KEY);
     if (!existing) {
       await storage.setItem(AI_CONFIGS_KEY, DEFAULT_AI_CONFIGS);
     }
+  });
+
+  // 右键菜单：每次后台启动重建（removeAll + create 幂等，老用户升级后 contexts 即时生效）。
+  // contexts 为全部场景：有划词时预填问题，无划词时打开空白新话题面板（与应用一致）。
+  browser.contextMenus.removeAll().finally(() => {
     browser.contextMenus.create({
       id: MENU_ID,
-      title: 'AskAll 齐问：打开提问面板',
-      contexts: ['selection'],
+      title: 'AskAll 齐问：发起问答',
+      contexts: ['all'],
     });
   });
 
-  // 右键菜单点击：向当前页面的内容脚本发送消息，打开浮动面板。
+  // 右键菜单点击：在当前标签页上方弹出浮动面板（划词文本预填，无划词为空白新话题），
+  // 由用户在面板中确认发送——与应用「新话题 → 输入 → 发起」的节奏一致。
   // 若内容脚本未注入（页面在扩展安装/更新前已打开，浏览器不会向旧页面注入），
-  // 先动态注入内容脚本再重试；只有注入也失败（chrome:// 等受限页面）才回退为直接发送。
+  // 先动态注入内容脚本再重试；只有注入也失败（chrome:// 等受限页面）时，
+  // 有划词才回退为直接发送，无划词则只能放弃。
   browser.contextMenus.onClicked.addListener(async (info) => {
-    if (info.menuItemId !== MENU_ID || !info.selectionText) return;
+    if (info.menuItemId !== MENU_ID) return;
     const tabs = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -47,7 +54,7 @@ export default defineBackground(() => {
     const showPanel = () =>
       browser.tabs.sendMessage(tabId, {
         type: 'SHOW_PANEL',
-        text: info.selectionText,
+        text: info.selectionText ?? '',
       });
 
     try {
@@ -61,9 +68,9 @@ export default defineBackground(() => {
         });
         await showPanel();
       } catch (err) {
-        // 受限页面无法注入，回退为直接发送
-        console.warn('[multi-ai-ask] 无法注入内容脚本，回退为直接提问:', err);
-        handleAsk(info.selectionText);
+        // 受限页面无法注入：有划词时回退为直接发送，无划词只能放弃
+        console.warn('[multi-ai-ask] 无法注入内容脚本:', err);
+        if (info.selectionText) handleAsk(info.selectionText);
       }
     }
   });
@@ -89,7 +96,9 @@ export default defineBackground(() => {
   }
 
   // 监听内容脚本消息（划词浮动面板 + 回答完成 + 打开设置）
-  browser.runtime.onMessage.addListener((msg) => {
+  // 注意：WXT 的 browser 在 Chrome 下是原生 chrome API，监听器「返回值」不会作为
+  // 响应送达（Firefox 的 Promise 返回也不接受普通对象），必须走 sendResponse 同步回传。
+  browser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'ASK_AI' && msg.text) {
       handleAsk(msg.text, msg.aiIds);
       return;
@@ -128,7 +137,8 @@ export default defineBackground(() => {
     }
     if (msg?.type === 'GET_TASK') {
       const task = currentTaskId ? tasks.get(currentTaskId) : undefined;
-      return { task: task ?? null };
+      sendResponse({ task: task ?? null });
+      return;
     }
     // 兼容旧版轮询：返回当前任务各 AI 的回复（按 aiName）
     if (msg?.type === 'GET_REPLIES') {
@@ -139,7 +149,8 @@ export default defineBackground(() => {
           replies[r.aiName] = r.answer;
         }
       }
-      return { replies };
+      sendResponse({ replies });
+      return;
     }
     if (msg?.type === 'OPEN_SETTINGS') {
       openSettingsPage();

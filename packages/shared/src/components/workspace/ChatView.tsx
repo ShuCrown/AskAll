@@ -8,7 +8,7 @@
  * 底部固定 Composer 用于追问。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink } from 'lucide-react';
+import { Check, Copy, ExternalLink, LayoutGrid } from 'lucide-react';
 import { getPlatform } from '../../lib/platform';
 import {
   buildTurns,
@@ -18,7 +18,15 @@ import {
 import { ANSWER_MAX_LEN } from '../../utils/history';
 import type { AiStatus } from '../../utils/task';
 import AiAnswerCard from './AiAnswerCard';
+import AiIcon from './AiIcon';
 import Composer from './Composer';
+
+/** 会话内出现的 AI（按轮次顺序去重） */
+interface ChatAi {
+  key: string; // 优先 aiId，旧数据回退 name
+  id?: string;
+  name: string;
+}
 
 /** 判断快照文本是否被截断过（truncateAnswer 的尾部标记） */
 function isTruncated(text: string): boolean {
@@ -158,6 +166,56 @@ export default function ChatView({ convKey }: { convKey: string }) {
     [history, liveTasks, taskHistory, convKey],
   );
 
+  // 会话内出现的 AI 列表（默认展示第一个 chat 窗口；可切换查看其他 AI / 全部）
+  const ais = useMemo<ChatAi[]>(() => {
+    const map = new Map<string, ChatAi>();
+    // 倒序扫轮次：最新轮到最旧轮，AI 首次出现即入表（前言 reviewed）
+    for (const t of [...turns].reverse()) {
+      for (const r of Object.values(t.liveResults ?? {})) {
+        map.set(r.aiId, { key: r.aiId, id: r.aiId, name: r.aiName });
+      }
+      for (const u of t.aiUrls) {
+        const key = u.id ?? u.name;
+        if (!map.has(key)) map.set(key, { key, id: u.id, name: u.name });
+      }
+      for (const a of t.answers ?? []) {
+        const key = a.aiId ?? a.name;
+        if (!map.has(key)) map.set(key, { key, id: a.aiId, name: a.name });
+      }
+    }
+    return [...map.values()];
+  }, [turns]);
+
+  // 当前聚焦的 AI key；null = 全部（完整时间线）。默认选中第一个 AI 的 chat 窗口
+  const [focusAi, setFocusAi] = useState<string | null>(null);
+  useEffect(() => {
+    setFocusAi(ais[0]?.key ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convKey, ais.length > 0]);
+
+  // 按聚焦 AI 过滤：只保留该 AI 的回答（问题保留，供上下文）
+  const filteredTurns = useMemo(() => {
+    if (!focusAi) return turns;
+    return turns.map((t) => {
+      const liveResults = t.liveResults
+        ? Object.fromEntries(
+            Object.entries(t.liveResults).filter(([id]) => id === focusAi),
+          )
+        : undefined;
+      const answers = t.answers?.filter(
+        (a) => (a.aiId ?? a.name) === focusAi,
+      );
+      const aiUrls = t.aiUrls.filter((u) => (u.id ?? u.name) === focusAi);
+      const snap = answers && answers.length > 0 ? answers : undefined;
+      return { ...t, liveResults, answers: snap, aiUrls };
+    }).filter(
+      (t) =>
+        (t.liveResults && Object.keys(t.liveResults).length > 0) ||
+        (t.answers?.length ?? 0) > 0 ||
+        t.aiUrls.length > 0,
+    );
+  }, [turns, focusAi]);
+
   // 进行中统计（仅统计实时轮次）
   const liveTurn = turns.find((t) => t.live);
   const liveResults = liveTurn?.liveResults
@@ -187,12 +245,59 @@ export default function ChatView({ convKey }: { convKey: string }) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* 时间线 */}
+      {/* 顶部 AI 切换条：默认聚焦第一个 AI 的 chat 窗口，可切换其他 AI / 全部 */}
+      {ais.length > 0 && (
+        <div className="shrink-0 border-b bg-card/60 px-3 py-1.5">
+          <div className="flex flex-wrap items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setFocusAi(null)}
+              title="完整时间线（所有 AI）"
+              className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                focusAi === null
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+              }`}
+            >
+              <LayoutGrid className="h-3 w-3" />
+              全部
+            </button>
+            {ais.map((a) => (
+              <button
+                key={a.key}
+                type="button"
+                onClick={() => setFocusAi(a.key)}
+                title={`查看 ${a.name} 的聊天窗口`}
+                className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                  focusAi === a.key
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                }`}
+              >
+                <AiIcon aiId={a.id} name={a.name} size={12} />
+                <span className="max-w-[96px] truncate">{a.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 时间线（聚焦 AI 时仅该 AI 的回答） */}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         <div className="mx-auto flex max-w-3xl flex-col gap-4">
-          {turns.map((turn, i) => (
-            <TurnBlock key={turn.historyId ?? turn.taskId ?? i} turn={turn} index={i} />
-          ))}
+          {filteredTurns.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+              <p>该 AI 暂无回答内容</p>
+            </div>
+          ) : (
+            filteredTurns.map((turn, i) => (
+              <TurnBlock
+                key={turn.historyId ?? turn.taskId ?? i}
+                turn={turn}
+                index={i}
+              />
+            ))
+          )}
           <div ref={bottomRef} />
         </div>
       </div>
