@@ -176,18 +176,16 @@ export default function Workspace({
    */
   const bottomComposer =
     isTauri && activeConvId ? (
-      <div className="shrink-0 rounded-xl bg-card px-3 py-2.5 shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
-        <Composer placeholder="继续追问，将发送至所选 AI 的当前聊天页…" />
-      </div>
+      <Composer placeholder="继续追问，将发送至所选 AI 的当前聊天页…" />
     ) : null;
 
   const mainCard = (
-    <div className="absolute inset-0 flex flex-col gap-2.5 p-2.5">
+    <div className="absolute inset-0 flex flex-col pl-3 pt-4 pr-4">
       {!sidebarOpen && <div className="h-14 shrink-0" aria-hidden="true" />}
-      <div className="min-h-0 flex-1 overflow-hidden rounded-xl bg-card shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
-        {main}
-      </div>
-      {bottomComposer}
+      <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
+      {bottomComposer && (
+        <div className="shrink-0 pb-4 pt-2">{bottomComposer}</div>
+      )}
     </div>
   );
 

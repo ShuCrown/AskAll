@@ -16,7 +16,7 @@
  * 使标题栏露在 webview 之上、可正常点击放大/收起。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LayoutGrid, Loader2, Maximize2, Minimize2 } from 'lucide-react';
+import { Loader2, Maximize2, Minimize2 } from 'lucide-react';
 import { getPlatform, type OpenMode } from '../../lib/platform';
 import { useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
@@ -39,6 +39,10 @@ interface GridAi {
 /** 每个格子顶部标题栏高度（逻辑 px = 主窗口 CSS px）。Rust 布局把聊天页下移该高度，
  *  使标题栏（AI 名称 + 放大/收起按钮）露在 native webview 之上可交互。 */
 const CELL_HEADER_H = 30;
+
+/** 聊天页相对格子的内缩（px）：native webview 是直角矩形、圆角需靠 DOM 窗口边框呈现，
+ *  把 webview 四边内缩该值，露出格子的圆角边框（独立圆角窗口），并保证不超出面板区。 */
+const CELL_INSET = 3;
 
 export default function GridChat({ convKey }: { convKey: string }) {
   const activeConvId = useAskStore((s) => s.activeConvId);
@@ -138,10 +142,12 @@ export default function GridChat({ convKey }: { convKey: string }) {
           aiId: keyOf(a),
           url: a.url,
           name: a.name,
-          x: visible ? x : 0,
-          y: visible ? y + CELL_HEADER_H : 0,
-          width: visible ? width : 0,
-          height: visible ? Math.max(0, height - CELL_HEADER_H) : 0,
+          x: visible ? x + CELL_INSET : 0,
+          y: visible ? y + CELL_HEADER_H + CELL_INSET : 0,
+          width: visible ? Math.max(0, width - CELL_INSET * 2) : 0,
+          height: visible
+            ? Math.max(0, height - CELL_HEADER_H - CELL_INSET * 2)
+            : 0,
         });
       };
       if (focusAi) {
@@ -185,17 +191,6 @@ export default function GridChat({ convKey }: { convKey: string }) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* 顶部信息条（位于网格区之外，聊天页从不覆盖它） */}
-      <div className="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5">
-        <LayoutGrid className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="text-xs font-medium text-muted-foreground">
-          {focusKey ? '已放大 · 点击标题栏右上角「收起」回到田字格' : '田字格'}
-        </span>
-        <span className="ml-auto text-[11px] text-muted-foreground">
-          共 {ais.length} 个 AI 聊天页
-        </span>
-      </div>
-
       {/* 田字格区：DOM 占位（骨架），真实页面由 Rust webview 覆盖（下移标题栏高度） */}
       <div ref={gridRef} className="relative min-h-0 flex-1">
         {visibleAis.length === 0 ? (
@@ -271,8 +266,9 @@ function GridCellView({
   return (
     <div
       className={cn(
-        'relative flex min-h-0 flex-col overflow-hidden rounded-md border bg-card',
-        focused && 'rounded-xl border-border shadow-[0_4px_20px_rgba(0,0,0,0.08)]',
+        'relative flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card',
+        focused &&
+          'rounded-xl border-border shadow-[0_4px_20px_rgba(0,0,0,0.08)]',
       )}
       style={{ height: focused ? '100%' : undefined }}
     >
