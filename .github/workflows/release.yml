@@ -1,4 +1,4 @@
-name: Build & Release Extension
+name: Build & Release (Extension + Desktop)
 
 # 触发方式：
 #   1. push 到 main 分支（任意文件改动）时，自动构建并创建 draft Release
@@ -22,25 +22,41 @@ env:
 
 jobs:
   # ============================================================
-  # 提取版本与更新内容
+  # 提取版本 / 更新说明 / 自上一版本 tag 以来的提交记录
   # ============================================================
   prepare:
-    name: Read version & notes
+    name: Read version & notes & changelog
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.read.outputs.VERSION }}
       notes_zh: ${{ steps.read.outputs.NOTES_ZH }}
       notes_en: ${{ steps.read.outputs.NOTES_EN }}
+      changes: ${{ steps.read.outputs.CHANGES }}
       tag: ${{ steps.read.outputs.TAG }}
     steps:
+      # fetch-depth: 0 拉取全部历史与 tag，用于生成自上一版本以来的提交记录
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Read version.json
+      - name: Read version.json & changelog
         id: read
         run: |
           version=$(jq -r '.version' "$VERSION_FILE")
           echo "VERSION=$version" >> "$GITHUB_OUTPUT"
           echo "TAG=v$version" >> "$GITHUB_OUTPUT"
+
+          # 自上一版本 tag 以来的提交记录；尚无 tag 时取最近 30 条
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$last_tag" ]; then
+            changes=$(git log "$last_tag"..HEAD --oneline --no-merges)
+          else
+            changes=$(git log --oneline --no-merges -n 30)
+          fi
+          if [ -z "$changes" ]; then
+            changes="（当前版本无新提交）"
+          fi
+
           # 多行内容必须使用 heredoc 分隔符语法，否则 GITHUB_OUTPUT 报 "Invalid format"
           {
             echo "NOTES_ZH<<ASKALL_EOF"
@@ -49,13 +65,16 @@ jobs:
             echo "NOTES_EN<<ASKALL_EOF"
             jq -r '.release_notes.en' "$VERSION_FILE"
             echo "ASKALL_EOF"
+            echo "CHANGES<<ASKALL_EOF"
+            printf '%s\n' "$changes"
+            echo "ASKALL_EOF"
           } >> "$GITHUB_OUTPUT"
 
   # ============================================================
-  # 打包 Chrome 与 Firefox（不依赖任何插件平台账号）
+  # 打包浏览器扩展（Chrome + Firefox）
   # ============================================================
   build:
-    name: Build & package ${{ matrix.browser }}
+    name: Build extension ${{ matrix.browser }}
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
@@ -82,12 +101,10 @@ jobs:
       # 用 version.json 覆盖 WXT（扩展子包 apps/extension/package.json）的版本号。
       # 注意：必须改 apps/extension/package.json，WXT 读取的是扩展子包的 version，
       # 而非 monorepo 根 package.json，否则打出来的扩展版本永远是 1.0.0。
-      - name: Sync version
+      - name: Sync version (extension)
         run: |
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('apps/extension/package.json'));p.version=process.env.VERSION;fs.writeFileSync('apps/extension/package.json',JSON.stringify(p,null,2)+'\n')"
-          echo "$VERSION" > .version
           cat apps/extension/package.json | grep version
-          ls -la
 
       # WXT 只安装在 apps/extension 子包中，必须用 --filter 限定到该包，
       # 否则 pnpm 会在 workspace 根递归执行 wxt 并报 ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL。
@@ -126,11 +143,94 @@ jobs:
           if-no-files-found: error
 
   # ============================================================
+  # 打包桌面端（Tauri）：macOS + Windows
+  # 产物：macOS .dmg / .app.zip；Windows .msi / .exe
+  # 说明：桌面端未配置签名证书，产物为未签名安装包，适合草稿 Release 内测分发
+  # ============================================================
+  desktop:
+    name: Build desktop ${{ matrix.os }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      # Rust 工具链 + 增量缓存（首次冷编译约 10-20 分钟，缓存后大幅提速）
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 同步版本：Tauri 打包版本取自 tauri.conf.json 的 version 字段，
+      # 同时同步 package.json / Cargo.toml，避免三者不一致。
+      - name: Sync version (desktop)
+        shell: bash
+        run: |
+          node -e "
+          const fs=require('fs');
+          const v=process.env.VERSION;
+          const pkg=JSON.parse(fs.readFileSync('apps/desktop/package.json'));
+          pkg.version=v; fs.writeFileSync('apps/desktop/package.json',JSON.stringify(pkg,null,2)+'\n');
+          const conf=JSON.parse(fs.readFileSync('apps/desktop/src-tauri/tauri.conf.json'));
+          conf.version=v; fs.writeFileSync('apps/desktop/src-tauri/tauri.conf.json',JSON.stringify(conf,null,2)+'\n');
+          const cargo=fs.readFileSync('apps/desktop/src-tauri/Cargo.toml','utf8');
+          fs.writeFileSync('apps/desktop/src-tauri/Cargo.toml', cargo.replace(/^version = \".*\"$/m, 'version = \"'+v+'\"'));
+          "
+          grep -m1 '"version"' apps/desktop/src-tauri/tauri.conf.json
+
+      # beforeBuildCommand（pnpm build）会在 apps/desktop 内执行，无需额外处理
+      - name: Build (${{ matrix.os }})
+        run: pnpm --filter @askall/desktop tauri build
+
+      # 把 bundle 各子目录（macos/nsis/msi/dmg…）的安装包文件摊平到 desktop-dist/，
+      # macOS 的 .app 目录压缩为 zip，避免 Release 上传目录被展开成几百个文件。
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -e
+          ROOT="$PWD"
+          BUNDLE="apps/desktop/src-tauri/target/release/bundle"
+          DIST="desktop-dist"
+          rm -rf "$DIST" && mkdir -p "$DIST"
+          # 安装包文件直接拷贝（Windows .msi/.exe；macOS .dmg）
+          find "$BUNDLE" -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} "$DIST/" \;
+          # macOS .app 目录压缩为 zip
+          app_dir=$(find "$BUNDLE" -maxdepth 2 -type d -name "*.app" | head -n1 || true)
+          if [ -n "$app_dir" ]; then
+            (cd "$(dirname "$app_dir")" && zip -rq "$ROOT/$DIST/$(basename "$app_dir").zip" "$(basename "$app_dir")")
+          fi
+          ls -la "$DIST"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: desktop-${{ matrix.os }}-${{ env.VERSION }}
+          path: desktop-dist
+          if-no-files-found: error
+
+  # ============================================================
   # 创建 GitHub Release（始终为草稿 draft，需手动发布）
+  # 包含：扩展产物（chrome/firefox zip）+ 桌面端产物（macOS/Windows 安装包）
   # ============================================================
   release:
     name: Create draft GitHub Release
-    needs: [prepare, build]
+    needs: [prepare, build, desktop]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -145,12 +245,29 @@ jobs:
 
       - name: Write release notes
         run: |
-          # 多行内容用带引号的 heredoc 写入，避免变量展开与格式问题
+          # 多行内容用带引号的 heredoc 写入；${{ }} 表达式在步骤执行前已被 GitHub 替换，
+          # 因此嵌套的 notes / changes 多行内容可以正常写入
           cat > RELEASE_NOTES.md <<'ASKALL_NOTES_EOF_7f3a'
-          ## zh-CN
+          # AskAll 齐问 v${{ needs.prepare.outputs.version }}
+
+          ## 🚀 本次升级内容（zh-CN）
+
           ${{ needs.prepare.outputs.notes_zh }}
 
-          ## English
+          ## 📦 提交记录（自上一版本以来）
+
+          ${{ needs.prepare.outputs.changes }}
+
+          ## 产物清单（Artifacts）
+
+          - 浏览器扩展：Chrome / Firefox（zip）
+          - 桌面端（macOS）：.dmg / .app.zip
+          - 桌面端（Windows）：.msi / .exe
+
+          ---
+
+          ## What's Changed (English)
+
           ${{ needs.prepare.outputs.notes_en }}
           ASKALL_NOTES_EOF_7f3a
 
@@ -159,13 +276,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 收集全部已下载的产物文件（desktop 产物已摊平为文件，无目录展开问题）
+          mapfile -t files < <(find artifacts -type f)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No artifact files found"
+            exit 1
+          fi
+          echo "Uploading ${#files[@]} file(s):"
+          printf '%s\n' "${files[@]}"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
             if [ "$is_draft" = "true" ]; then
               echo "Draft release $TAG 已存在，更新附件与说明…"
-              gh release upload "$TAG" artifacts/**/*.zip --clobber
+              gh release upload "$TAG" "${files[@]}" --clobber
               gh release edit "$TAG" \
-                --title "v$VERSION" \
+                --title "AskAll 齐问 v$VERSION" \
                 --notes-file RELEASE_NOTES.md \
                 --draft
             else
@@ -174,8 +300,8 @@ jobs:
           else
             echo "创建新 draft release $TAG …"
             gh release create "$TAG" \
-              --title "v$VERSION" \
+              --title "AskAll 齐问 v$VERSION" \
               --notes-file RELEASE_NOTES.md \
               --draft \
-              artifacts/**/*.zip
+              "${files[@]}"
           fi
