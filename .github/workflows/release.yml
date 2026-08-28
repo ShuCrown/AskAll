@@ -245,7 +245,7 @@ jobs:
 
       - name: Write release notes
         run: |
-          # 多行内容用带引号的 heredoc 写入；${{ }} 表达式在步骤执行前已被 GitHub 替换，
+          # 多行内容用带引号的 heredoc 写入；模板表达式在步骤执行前已被 GitHub 替换，
           # 因此嵌套的 notes / changes 多行内容可以正常写入
           cat > RELEASE_NOTES.md <<'ASKALL_NOTES_EOF_7f3a'
           # AskAll 齐问 v${{ needs.prepare.outputs.version }}
