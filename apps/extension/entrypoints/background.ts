@@ -98,7 +98,8 @@ export default defineBackground(() => {
       handleFollowUp(msg.text, msg.aiIds);
       return;
     }
-    // 发送中/流式/完成：由 autoSend 经 content script 桥接转发而来
+    // 发送中/流式/完成：由 autoSend 经 content script 桥接转发而来。
+    // 携带 url（真实会话页 chat/xxx）时同步写入任务结果，供跳转对应会话。
     if (msg?.type === 'AI_SENDING' && msg.aiId) {
       updateResult(msg.taskId, msg.aiId, { status: 'sending' });
       return;
@@ -107,6 +108,7 @@ export default defineBackground(() => {
       updateResult(msg.taskId, msg.aiId, {
         status: 'streaming',
         answer: msg.text ?? '',
+        ...(typeof msg.url === 'string' && msg.url ? { url: msg.url } : {}),
       });
       return;
     }
@@ -114,6 +116,7 @@ export default defineBackground(() => {
       updateResult(msg.taskId, msg.aiId, {
         status: 'done',
         answer: msg.text ?? '',
+        ...(typeof msg.url === 'string' && msg.url ? { url: msg.url } : {}),
       });
       // 回答快照落盘：写入对应历史条目，供工作台回放（兜底文案会被标记为 error）
       const task = msg.taskId ? tasks.get(msg.taskId) : undefined;

@@ -74,10 +74,7 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Shortcut::new(
-                Some(Modifiers::CONTROL | Modifiers::ALT),
-                Code::KeyQ,
-            )
+            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyQ)
         }
     };
 

@@ -2,7 +2,8 @@
 //!
 //! 与扩展端 `packages/shared/src/utils/autoSend.ts` 等价的「纯页面上下文」实现，
 //! 但回传通道由 `chrome.runtime.sendMessage` 改为 Tauri IPC：
-//!   `window.__TAURI_INTERNALS__.invoke('emit_ai_reply', { type, aiId, aiName, taskId, text })`
+//!   `window.__TAURI_INTERNALS__.invoke('emit_ai_reply', { type, aiId, aiName, taskId, text, url })`
+//!   url 为回复发生时的页面地址（真实会话页 chat/xxx），用于跳转与历史回写。
 //! 由 lib.rs 的 `emit_ai_reply` 命令接收并转发为 'ai-reply' 事件给主窗口。
 //!
 //! 脚本以 IIFE 形式运行，不引用任何外部变量，所有参数通过占位符注入。
@@ -21,7 +22,7 @@ const JS_TEMPLATE: &str = r#"
   var SEND_CANDS = __SEND_CANDS__;
   var REPLY_CANDS = __REPLY_CANDS__;
 
-  function emit(type, text) {
+  function emit(type, text, url) {
     try {
       if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
         window.__TAURI_INTERNALS__.invoke('emit_ai_reply', {
@@ -29,7 +30,8 @@ const JS_TEMPLATE: &str = r#"
           aiId: AI_ID,
           aiName: AI_NAME,
           taskId: TASK_ID,
-          text: text == null ? null : String(text)
+          text: text == null ? null : String(text),
+          url: url == null ? null : String(url)
         });
       }
     } catch (e) { /* 忽略 IPC 不可用 */ }
@@ -189,8 +191,10 @@ const JS_TEMPLATE: &str = r#"
           if (Date.now() - begun > 120000) { clearInterval(timer); try { obs && obs.disconnect(); } catch (e) {} resolve(); return; }
           var tx = extract();
           if (tx.length) {
-            if (tx !== last) { last = tx; stable = Date.now(); emit('AI_REPLY', tx.slice(0, 4000)); }
-            else if (Date.now() - stable > 2500) { emit('AI_REPLY_DONE', tx.slice(0, 4000)); clearInterval(timer); try { obs && obs.disconnect(); } catch (e) {} resolve(); }
+            // 附带当前页面地址：发送成功后站点会跳到真实会话页（chat/xxx），
+            // 回传给主窗口用于「跳转对应会话」与历史回写。
+            if (tx !== last) { last = tx; stable = Date.now(); emit('AI_REPLY', tx.slice(0, 4000), location.href); }
+            else if (Date.now() - stable > 2500) { emit('AI_REPLY_DONE', tx.slice(0, 4000), location.href); clearInterval(timer); try { obs && obs.disconnect(); } catch (e) {} resolve(); }
           } else { last = ''; stable = Date.now(); }
         }
         var obs = null;
@@ -231,10 +235,13 @@ pub fn build_payload(
     let j = |v: &str| serde_json::to_string(v).unwrap_or_else(|_| "\"\"".to_string());
     let arr = |v: &[String]| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string());
 
-    let input_cands = selectors
-        .input_candidates
-        .clone()
-        .unwrap_or_else(|| if selectors.input.is_empty() { vec![] } else { vec![selectors.input.clone()] });
+    let input_cands = selectors.input_candidates.clone().unwrap_or_else(|| {
+        if selectors.input.is_empty() {
+            vec![]
+        } else {
+            vec![selectors.input.clone()]
+        }
+    });
     let send_cands = selectors
         .send_button_candidates
         .clone()

@@ -7,7 +7,8 @@
 //!   - open_ai_webview(url)                 手动打开 AI 站点（内嵌子窗口）
 //!   - show_ai_chat(aiId, url, name)        展示/复用 AI 问答页子窗口（chat tabs 入口）
 //!   - open_settings_window()               打开/聚焦独立设置窗口（#settings 路由）
-//!   - emit_ai_reply(type, aiId, aiName, taskId, text)  子窗口回传回复（IPC）
+//!   - emit_ai_reply(type, aiId, aiName, taskId, text, url)  子窗口回传回复（IPC），
+//!     url 为回复发生时的页面地址（真实会话页 chat/xxx）
 //!
 //! 「ask 编排器」：
 //!   - mode = "browser"  → opener 在系统浏览器打开（无法自动发送，回传提示）
@@ -77,12 +78,20 @@ pub struct ReplyPayload {
     pub task_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// 回复发生时的页面地址（真实会话页 chat/xxx），用于跳转对应会话与历史回写。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 // ---------- 应用状态 ----------
 
 struct AppState {
     current_task: Mutex<Option<AskTask>>,
+    /// aiId -> 该 AI 子窗口当前已知 URL。
+    /// 提问时记为配置首页；捕获到回复时更新为真实会话地址（chat/xxx）。
+    /// `show_ai_chat` 据此做「差异导航」：请求地址与当前一致时只显示不跳转，
+    /// 避免重复 reload 打断进行中的流式回复。
+    ai_current_urls: Mutex<HashMap<String, String>>,
 }
 
 // ---------- 工具函数 ----------
@@ -161,6 +170,7 @@ async fn run_one_ai(
                 ai_name: cfg.name.clone(),
                 task_id,
                 text: Some("已在系统浏览器打开，请在浏览器中手动发送 / 查看。".into()),
+                url: None,
             },
         );
         return;
@@ -180,11 +190,21 @@ async fn run_one_ai(
                         ai_name: cfg.name.clone(),
                         task_id,
                         text: Some(format!("打开内嵌窗口失败：{e}")),
+                        url: None,
                     },
                 );
                 return;
             }
         };
+
+    // 记录该 AI 子窗口当前所在 URL（配置首页），供 show_ai_chat 差异导航：
+    // 请求地址与此一致（或页面已自行跳到会话页）时只显示不跳转，
+    // 避免重复 reload 打断进行中的流式回复。
+    app.state::<AppState>()
+        .ai_current_urls
+        .lock()
+        .await
+        .insert(cfg.id.clone(), cfg.url.clone());
 
     let _ = app.emit(
         "ai-reply",
@@ -194,6 +214,7 @@ async fn run_one_ai(
             ai_name: cfg.name.clone(),
             task_id: task_id.clone(),
             text: None,
+            url: None,
         },
     );
 
@@ -314,41 +335,74 @@ async fn open_ai_webview(app: tauri::AppHandle, url: String) -> Result<(), Strin
 }
 
 /// 展示某个 AI 的问答页窗口（顶部 chat tabs / 回答卡片「打开源会话」入口）。
-/// 复用提问时创建的隐藏 `ai-{aiId}` 子窗口（保留当前聊天状态），
-/// 不存在（如重启后回看历史会话）则以该会话 URL 新建可见窗口。
+/// 复用提问时创建的隐藏 `ai-{aiId}` 子窗口（保留当前聊天状态）；
+/// 「差异导航」：仅当请求地址（如历史会话 chat/xxx）与窗口当前已知地址不同时
+/// 才跳转，避免点击当前会话的 tab 反复 reload 打断流式回复。
+/// 窗口不存在（如重启后回看历史会话）则以该会话 URL 新建可见窗口。
 #[tauri::command]
 async fn show_ai_chat(
     app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
     ai_id: String,
     url: String,
     name: Option<String>,
 ) -> Result<(), String> {
     let label = format!("ai-{}", ai_id);
+    let known = state.ai_current_urls.lock().await.get(&ai_id).cloned();
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.show();
         let _ = w.set_focus();
+        // 差异导航：请求地址与当前已知地址一致时仅显示，不重新加载页面
+        if !url.is_empty() && known.as_deref() != Some(url.as_str()) {
+            let js = format!("window.location.replace({:?})", url);
+            let _ = w.eval(&js);
+            state.ai_current_urls.lock().await.insert(ai_id, url);
+        }
         return Ok(());
     }
     let title = name.unwrap_or_else(|| "AskAll AI".into());
-    get_or_create_ai_window(&app, &label, &title, &url, true, true).map(|_| ())
+    get_or_create_ai_window(&app, &label, &title, &url, true, true).map(|_| ())?;
+    state.ai_current_urls.lock().await.insert(ai_id, url);
+    Ok(())
 }
 
 /// 子窗口通过 __TAURI_INTERNALS__.invoke 回传回复；本命令转发为主窗口事件。
+/// 携带 `url`（回复发生时的页面地址）时，同时更新任务结果与窗口 URL 记录，
+/// 供前端「跳转对应会话」与历史回写使用。
 #[tauri::command]
 async fn emit_ai_reply(
     app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
     r#type: String,
     ai_id: String,
     ai_name: String,
     task_id: String,
     text: Option<String>,
+    url: Option<String>,
 ) -> Result<(), String> {
+    if let Some(url) = url.as_deref().filter(|u| !u.is_empty()) {
+        // 窗口已自行跳转到真实会话页（chat/xxx）：更新已知地址 + 任务结果
+        state
+            .ai_current_urls
+            .lock()
+            .await
+            .insert(ai_id.clone(), url.to_string());
+        let mut guard = state.current_task.lock().await;
+        if let Some(task) = guard.as_mut() {
+            if task.id == task_id {
+                if let Some(r) = task.results.get_mut(&ai_id) {
+                    r.url = Some(url.to_string());
+                }
+            }
+        }
+    }
     let payload = ReplyPayload {
         kind: r#type,
         ai_id,
         ai_name,
         task_id,
         text,
+        url,
     };
     let _ = app.emit("ai-reply", &payload);
     Ok(())
@@ -363,19 +417,15 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = w.set_focus();
         return Ok(());
     }
-    let win = WebviewWindowBuilder::new(
-        &app,
-        LABEL,
-        WebviewUrl::App("index.html#settings".into()),
-    )
-    .title("AskAll 齐问 · 设置")
-    .title_bar_style(tauri::TitleBarStyle::Overlay)
-    .hidden_title(true)
-    .traffic_light_position(tauri::LogicalPosition::new(16.0, 26.0))
-    .inner_size(760.0, 640.0)
-    .min_inner_size(560.0, 480.0)
-    .build()
-    .map_err(|e| e.to_string())?;
+    let win = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App("index.html#settings".into()))
+        .title("AskAll 齐问 · 设置")
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(16.0, 26.0))
+        .inner_size(760.0, 640.0)
+        .min_inner_size(560.0, 480.0)
+        .build()
+        .map_err(|e| e.to_string())?;
     let _ = win.set_focus();
     Ok(())
 }
@@ -387,11 +437,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new().build(),
-        )
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState {
             current_task: Mutex::new(None),
+            ai_current_urls: Mutex::new(HashMap::new()),
         })
         .setup(|app| {
             // 注册系统级「划词提问」全局快捷键（失败不阻断启动，仅告警）。

@@ -21,6 +21,7 @@ declare const chrome: {
       text?: string;
       taskId?: string;
       aiId?: string;
+      url?: string;
     }) => void;
   };
 };
@@ -31,6 +32,8 @@ interface ReplyPayload {
   text?: string;
   taskId?: string;
   aiId?: string;
+  /** 回复发生时的页面地址（真实会话页 chat/xxx），用于跳转与历史回写 */
+  url?: string;
 }
 
 export async function autoFillAndSend(
@@ -511,6 +514,8 @@ export async function autoFillAndSend(
       }
       const text = extract();
       if (text.length > 0) {
+        // 附带当前页面地址：发送成功后站点会跳到真实会话页（chat/xxx），
+        // 回传给 background 用于「跳转对应会话」与历史回写。
         if (text !== lastText) {
           lastText = text;
           stableSince = Date.now();
@@ -520,6 +525,7 @@ export async function autoFillAndSend(
             taskId: tid,
             aiId: aid,
             text: text.slice(0, 4000),
+            url: location.href,
           });
         } else if (Date.now() - stableSince > STABLE_MS) {
           console.log(`✅ [multi-ai-ask] ${name} 回答完成`);
@@ -529,6 +535,7 @@ export async function autoFillAndSend(
             taskId: tid,
             aiId: aid,
             text: text.slice(0, 4000),
+            url: location.href,
           });
           finish();
         }

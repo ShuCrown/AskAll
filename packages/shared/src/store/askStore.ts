@@ -16,7 +16,9 @@ import {
   addHistory,
   getHistory,
   groupConversations,
+  isFallbackNotice,
   mergeAnswer,
+  updateHistoryUrl,
   type Conversation,
   type HistoryItem,
 } from '../utils/history';
@@ -250,13 +252,24 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
           status: 'opening',
           answer: '',
         };
-        // 两端 AI_REPLY/AI_REPLY_DONE 均为全量文本：替换而非追加
+        // 两端 AI_REPLY/AI_REPLY_DONE 均为全量文本：替换而非追加；
+        // 携带 url 时同步更新真实会话地址（chat/xxx），供 chat tabs 跳转
         const next: AiResult =
           msg.type === 'AI_SENDING'
             ? { ...result, status: 'sending' }
             : msg.type === 'AI_REPLY'
-              ? { ...result, status: 'streaming', answer: msg.text }
-              : { ...result, status: 'done', answer: msg.text };
+              ? {
+                  ...result,
+                  status: 'streaming',
+                  answer: msg.text,
+                  ...(msg.url ? { url: msg.url } : {}),
+                }
+              : {
+                  ...result,
+                  status: 'done',
+                  answer: msg.text,
+                  ...(msg.url ? { url: msg.url } : {}),
+                };
         return {
           liveTasks: {
             ...s.liveTasks,
@@ -268,15 +281,19 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
         };
       });
 
-      // 回答完成：桌面端由 store 落盘快照；随后统一刷新历史
+      // 回答完成：桌面端由 store 落盘快照与真实会话 URL；随后统一刷新历史
       // （扩展端快照由 background 写入，这里只是把最新存储读回来）
       if (msg.type === 'AI_REPLY_DONE') {
         const s = get();
         const historyId = s.taskHistory[msg.taskId];
         if (getPlatform().kind === 'tauri' && historyId) {
-          void mergeAnswer(historyId, msg.aiId, msg.aiName, msg.text).then(
-            () => get().refreshHistory(),
-          );
+          const writes = [mergeAnswer(historyId, msg.aiId, msg.aiName, msg.text)];
+          // 真实会话地址（chat/xxx）回写历史：历史回放与 chat tabs 跳转据此直达会话页。
+          // 兜底提示（自动发送失败）不算真实回答，不回写地址。
+          if (msg.url && !isFallbackNotice(msg.text)) {
+            writes.push(updateHistoryUrl(historyId, msg.aiId, msg.aiName, msg.url));
+          }
+          void Promise.all(writes).then(() => get().refreshHistory());
         } else {
           void get().refreshHistory();
         }

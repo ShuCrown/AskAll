@@ -2,10 +2,9 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "./src",
-    "baseUrl": "./src",
     "paths": {
-      "@askall/shared": ["./index.ts"],
-      "@askall/shared/*": ["./*"]
+      "@askall/shared": ["./src/index.ts"],
+      "@askall/shared/*": ["./src/*"]
     }
   },
   "include": ["src/**/*"]

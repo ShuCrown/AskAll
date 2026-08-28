@@ -20,6 +20,8 @@ export type ReplyMessage =
       aiName: string;
       taskId: string;
       text: string;
+      /** 回复发生时的页面地址（真实会话页 chat/xxx），用于跳转对应会话 */
+      url?: string;
     }
   | {
       type: 'AI_REPLY_DONE';
@@ -27,6 +29,8 @@ export type ReplyMessage =
       aiName: string;
       taskId: string;
       text: string;
+      /** 回复完成时的页面地址（真实会话页 chat/xxx），用于跳转与历史回写 */
+      url?: string;
     };
 
 /** AI 站点打开方式：内嵌于应用窗口 / 在系统浏览器中打开。 */
