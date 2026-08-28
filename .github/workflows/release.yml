@@ -79,16 +79,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # 用 version.json 覆盖 package.json / WXT 的版本号
+      # 用 version.json 覆盖 WXT（扩展子包 apps/extension/package.json）的版本号。
+      # 注意：必须改 apps/extension/package.json，WXT 读取的是扩展子包的 version，
+      # 而非 monorepo 根 package.json，否则打出来的扩展版本永远是 1.0.0。
       - name: Sync version
         run: |
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('apps/extension/package.json'));p.version=process.env.VERSION;fs.writeFileSync('apps/extension/package.json',JSON.stringify(p,null,2)+'\n')"
           echo "$VERSION" > .version
-          cat package.json | grep version
+          cat apps/extension/package.json | grep version
           ls -la
 
+      # WXT 只安装在 apps/extension 子包中，必须用 --filter 限定到该包，
+      # 否则 pnpm 会在 workspace 根递归执行 wxt 并报 ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL。
       - name: Build (${{ matrix.browser }})
-        run: pnpm wxt zip -b ${{ matrix.browser }} --mode production
+        run: pnpm --filter @askall/extension zip -b ${{ matrix.browser }} --mode production
 
       # 定位实际生成的 zip（无论 wxt 默认命名成什么），校验存在后重命名为固定名称，
       # 避免 .output/*.zip 通配符匹配不到或匹配不一致的问题
