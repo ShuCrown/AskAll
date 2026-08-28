@@ -94,17 +94,20 @@ jobs:
       - name: Build (${{ matrix.browser }})
         run: pnpm --filter @askall/extension zip -b ${{ matrix.browser }} --mode production
 
-      # 定位实际生成的 zip（无论 wxt 默认命名成什么），校验存在后重命名为固定名称，
-      # 避免 .output/*.zip 通配符匹配不到或匹配不一致的问题
+      # wxt 经 --filter @askall/extension 在子包目录内执行，产物落在
+      # apps/extension/.output/（而非仓库根 .output/），故此处路径须对应子包目录。
       - name: Locate & rename zip
+        env:
+          OUT_DIR: apps/extension/.output
         run: |
-          if ! ls .output/*.zip >/dev/null 2>&1; then
-            echo "::error::No zip file found in .output/. Listing contents:"
-            ls -la .output/
+          if ! ls "$OUT_DIR"/*.zip >/dev/null 2>&1; then
+            echo "::error::No zip file found in $OUT_DIR/. Listing contents:"
+            ls -la "$OUT_DIR" || true
+            ls -la apps/extension || true
             exit 1
           fi
-          zip_file=$(ls .output/*.zip | head -n1)
-          target=".output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip"
+          zip_file=$(ls "$OUT_DIR"/*.zip | head -n1)
+          target="$OUT_DIR/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip"
           echo "Found zip: $zip_file"
           # 仅当文件名与目标不一致时才重命名，避免 mv 同名文件报错
           if [ "$zip_file" != "$target" ]; then
@@ -113,13 +116,13 @@ jobs:
           else
             echo "Zip already named correctly: $target"
           fi
-          ls -la .output/
+          ls -la "$OUT_DIR"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: extension-${{ matrix.browser }}-${{ env.VERSION }}
-          path: .output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip
+          path: apps/extension/.output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip
           if-no-files-found: error
 
   # ============================================================
