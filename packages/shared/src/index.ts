@@ -21,6 +21,7 @@ export type {
   PlatformStorage,
   PlatformWindow,
   PlatformAsk,
+  AskGridCell,
   ReplyMessage,
   OpenMode,
 } from './lib/platform';

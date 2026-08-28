@@ -61,24 +61,40 @@ export interface PlatformWindow {
   openSettings(): Promise<void>;
 }
 
+/** 田字格中单个 AI 聊天页的布局单元（桌面端专用，与 Rust GridCell 一致）。 */
+export interface AskGridCell {
+  aiId: string;
+  url: string;
+  name?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface PlatformAsk {
   /**
-   * 一次性提问：新建任务（新会话），并行打开各 AI 标签页/子 webview 并发送。
+   * 一次性提问：新建任务（新会话），并行打开各 AI 标签页/聊天页并发送。
    * 立即返回；各 AI 的回复进度通过 onReply 推送。
    */
   ask(text: string, aiIds?: string[]): Promise<void>;
   /**
-   * 追问：延续当前会话（复用已打开的聊天窗口），生成新任务。
+   * 追问：延续当前会话（复用已打开的聊天页），生成新任务。
    */
   followUp(text: string, aiIds?: string[]): Promise<void>;
   /** 获取当前任务（含各 AI 结果）。 */
   getTask(): Promise<{ task: AskTask | null }>;
   /**
    * 打开/切换到某 AI 聊天标签页/窗口。
-   * 携带 `aiId` 时优先复用该 AI 已有的聊天窗口（桌面端 `ai-{aiId}` 子窗口，
-   * 保留当前聊天状态），找不到才以 `url` 新开；`name` 用作新建窗口标题。
+   * 携带 `aiId` 时优先复用该 AI 已有的聊天页（保留当前聊天状态），
+   * 找不到才以 `url` 新开；`name` 用作新建窗口标题。
    */
   openAiTab(url: string, aiId?: string, name?: string): Promise<void>;
+  /**
+   * 桌面端田字格布局：把各 AI 聊天页按 cells 定位到主窗口。
+   * 扩展端无此能力，组件需先探测存在性。
+   */
+  layoutAiGrid?(cells: AskGridCell[]): Promise<void>;
   /** 订阅各 AI 回复进度。返回取消订阅函数。 */
   onReply(handler: (msg: ReplyMessage) => void): () => void;
 }

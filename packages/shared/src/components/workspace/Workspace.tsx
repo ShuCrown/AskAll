@@ -5,9 +5,10 @@
  *   - 侧栏展开时：侧栏顶部行 = 收起 + 搜索按钮；右侧纯内容区。
  *   - 侧栏收起时：右侧顶部行 = 展开 + 搜索按钮（+ 当前会话标题）。
  *   - 搜索统一走弹窗（SearchDialog），匹配历史会话。
- * 内容卡片顶部为会话内 chat 标签页（ChatTabs，仅桌面端）：
- *   - 「问答」为默认页——提问不弹窗，回答实际内容直接展示在时间线面板；
- *   - 各 AI tab 唤起/复用其问答页子窗口（弹窗显示），切换查看不同 chat。
+ * 会话内容（卡片内）：
+ *   - 桌面端：GridChat 田字格——各 AI 真实聊天页并排展示（提问不弹窗），
+ *     点击顶部 AI 按钮放大单个 chat 铺满整窗，可还原回田字格；
+ *   - 扩展端：ChatView 时间线（问题 + 回答卡片）。
  * 两种密度：
  *   - full    ：静态双栏（桌面主窗口 / 宽容器），侧栏可收起；
  *   - compact ：侧栏默认收起，展开时为覆盖式抽屉（扩展 popup 等窄容器）。
@@ -23,7 +24,7 @@ import { PanelLeftOpen, Search, SquarePen } from 'lucide-react';
 import { getPlatform } from '../../lib/platform';
 import { selectConversations, useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
-import ChatTabs from './ChatTabs';
+import GridChat from './GridChat';
 import ChatView from './ChatView';
 import EmptyState from './EmptyState';
 import SearchDialog from './SearchDialog';
@@ -152,8 +153,14 @@ export default function Workspace({
   }
 
   const isFull = autoDensity === 'full';
+  const isTauri = getPlatform().kind === 'tauri';
   const main = activeConvId ? (
-    <ChatView convKey={activeConvId} />
+    // 桌面端：田字格并排展示各 AI 聊天页（可放大单个/还原）；扩展端：时间线
+    isTauri ? (
+      <GridChat convKey={activeConvId} />
+    ) : (
+      <ChatView convKey={activeConvId} />
+    )
   ) : (
     <EmptyState />
   );
@@ -167,8 +174,6 @@ export default function Workspace({
     <div className="absolute inset-0 p-2">
       <div className="flex h-full flex-col overflow-hidden rounded-xl bg-card shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
         {!sidebarOpen && <div className="h-14 shrink-0" aria-hidden="true" />}
-        {/* 会话内 chat 标签页（仅桌面端；「问答」为默认面板内展示，AI tab 唤起弹窗） */}
-        <ChatTabs />
         <div className="min-h-0 flex-1">{main}</div>
       </div>
     </div>

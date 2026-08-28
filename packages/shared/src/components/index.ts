@@ -5,6 +5,7 @@ export { default as FloatingPanel } from './FloatingPanel';
 export { default as Workspace } from './workspace/Workspace';
 export type { WorkspaceDensity } from './workspace/Workspace';
 export { default as SessionSidebar } from './workspace/SessionSidebar';
+export { default as GridChat } from './workspace/GridChat';
 export { default as ChatView } from './workspace/ChatView';
 export { default as AiAnswerCard } from './workspace/AiAnswerCard';
 export { default as Composer } from './workspace/Composer';

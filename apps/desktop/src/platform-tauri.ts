@@ -164,6 +164,10 @@ export const tauriPlatform: PlatformApi = {
         await invoke('open_ai_webview', { url });
       }
     },
+    // 田字格布局：把各 AI 聊天页 attach 到主窗口并定位（cells 坐标/尺寸为逻辑像素）
+    layoutAiGrid: async (cells) => {
+      await invoke('layout_ai_grid', { cells });
+    },
     onReply: (handler) => {
       // listen 异步返回 unlisten；在等待期间若已取消，则立即释放，避免悬挂订阅。
       let unlisten: UnlistenFn | null = null;

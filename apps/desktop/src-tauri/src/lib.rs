@@ -2,21 +2,22 @@
 //!
 //! 与前端 `apps/desktop/src/platform-tauri.ts` 的契约一一对应：
 //!   - ask_ai(text, configs, mode)          新会话提问
-//!   - ask_ai_followup(text, configs, mode) 追问（复用已打开的 AI 子窗口）
+//!   - ask_ai_followup(text, configs, mode) 追问（复用已打开的 AI 聊天页）
 //!   - get_task() -> AskTask | null         当前任务
-//!   - open_ai_webview(url)                 手动打开 AI 站点（内嵌子窗口）
-//!   - show_ai_chat(aiId, url, name)        展示/复用 AI 问答页子窗口（chat tabs 入口）
+//!   - open_ai_webview(url)                 手动打开 AI 站点（独立子窗口）
+//!   - show_ai_chat(aiId, url, name)        聚焦/展示某个 AI 的聊天页
+//!   - layout_ai_grid(cells)                将各 AI 聊天页以网格布局到主窗口（田字格）
 //!   - open_settings_window()               打开/聚焦独立设置窗口（#settings 路由）
-//!   - emit_ai_reply(type, aiId, aiName, taskId, text, url)  子窗口回传回复（IPC），
+//!   - emit_ai_reply(type, aiId, aiName, taskId, text, url)  聊天页回传回复（IPC），
 //!     url 为回复发生时的页面地址（真实会话页 chat/xxx）
 //!
 //! 「ask 编排器」：
 //!   - mode = "browser"  → opener 在系统浏览器打开（无法自动发送，回传提示）
-//!   - mode = "embedded" → 创建/复用子 WebviewWindow（默认隐藏，不弹窗不抢焦点），
-//!     注入 auto_send::build_payload 产出的 JS（自动填充+发送+回复轮询），
+//!   - mode = "embedded" → 把 AI 聊天页以 Webview attach 到主窗口（不弹独立窗口），
+//!     由主窗口前端按「田字格」布局（layout_ai_grid），点击可放大单个 chat 铺满整窗、
+//!     可还原回网格；注入 auto_send::build_payload 产出的 JS（自动填充+发送+回复轮询），
 //!     JS 通过 __TAURI_INTERNALS__.invoke 回调 emit_ai_reply，再由本端
-//!     emit('ai-reply', payload) 推给主窗口；回答内容统一在主窗口问答面板展示，
-//!     需要查看 AI 原始问答页时经 show_ai_chat 唤起对应子窗口（弹窗显示）。
+//!     emit('ai-reply', payload) 推给主窗口，用于状态汇总与历史会话地址回写。
 
 mod auto_send;
 mod os_ask;
@@ -26,7 +27,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::WebviewBuilder;
+use tauri::{
+    Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, WebviewUrl,
+    WebviewWindowBuilder,
+};
 use tokio::sync::Mutex;
 
 // ---------- 数据模型（与前端 utils/task.ts、utils/aiConfig.ts 对齐） ----------
@@ -66,6 +71,20 @@ pub struct AskTask {
     pub created_at: f64,
     pub conversation_id: String,
     pub results: HashMap<String, AiResult>,
+}
+
+/// 主窗口田字格中单个 AI 聊天页的布局单元（与前端 AskGridCell 一致）。
+/// 坐标/尺寸为逻辑像素，相对主窗口内容区；width/height 为 0 表示隐藏该页。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GridCell {
+    pub ai_id: String,
+    pub url: String,
+    pub name: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// 推给主窗口的回复进度载荷（与前端 ReplyMessage 一致）。
@@ -114,40 +133,35 @@ fn gen_id() -> String {
     format!("{:x}-{:x}", ms, c)
 }
 
-/// 创建或复用 AI 子窗口。
-/// `navigate=true` 表示新会话，跳转到配置 URL；`false` 表示追问，保持当前页面。
-/// `show=false` 表示后台模式：新窗口隐藏创建、已存在窗口不抢焦点——
-/// 提问默认不再弹窗，回答内容统一回流主窗口问答面板，由 `show_ai_chat` 按需唤起。
-fn get_or_create_ai_window(
+/// 确保 `ai-{aiId}` 聊天页已作为 Webview attach 到主窗口，并定位到 (x,y,w,h)。
+/// 幂等：已存在时仅更新位置/尺寸（保留当前聊天状态，不重新加载）。
+/// 由两处调用：前端田字格布局（layout_ai_grid）与 ask 编排器（run_one_ai）。
+fn ensure_embedded_webview(
     app: &tauri::AppHandle,
-    label: &str,
-    title: &str,
+    ai_id: &str,
     url: &str,
-    navigate: bool,
-    show: bool,
-) -> Result<tauri::WebviewWindow, String> {
-    if let Some(w) = app.get_webview_window(label) {
-        if show {
-            let _ = w.show();
-            let _ = w.set_focus();
-        }
-        if navigate {
-            let js = format!("window.location.replace({:?})", url);
-            let _ = w.eval(&js);
-        }
-        return Ok(w);
+    name: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<tauri::Webview, String> {
+    let label = format!("ai-{}", ai_id);
+    if let Some(wv) = app.get_webview(&label) {
+        let _ = wv.set_position(Position::Logical(LogicalPosition::new(x, y)));
+        let _ = wv.set_size(Size::Logical(LogicalSize::new(w, h)));
+        return Ok(wv);
     }
+    let window = app.get_webview_window("main").ok_or("主窗口不存在")?;
     let parsed = url
         .parse::<url::Url>()
         .map_err(|e: url::ParseError| format!("invalid url: {e}"))?;
-    let win = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
-        .title(title)
-        .inner_size(520.0, 720.0)
-        .min_inner_size(360.0, 480.0)
-        .visible(show)
+    let wv = WebviewBuilder::new(window.window(), label, WebviewUrl::External(parsed))
         .build()
         .map_err(|e| e.to_string())?;
-    Ok(win)
+    let _ = wv.set_position(Position::Logical(LogicalPosition::new(x, y)));
+    let _ = wv.set_size(Size::Logical(LogicalSize::new(w, h)));
+    Ok(wv)
 }
 
 /// 单个 AI 的发送流程（在独立 tokio task 中运行）。
@@ -176,10 +190,11 @@ async fn run_one_ai(
         return;
     }
 
-    // embedded：创建/复用子窗口（后台模式，不弹窗）。追问时复用且不导航。
-    let label = format!("ai-{}", cfg.id);
+    // embedded：把聊天页 attach 到主窗口（不弹独立窗口），由前端田字格统一布局。
+    // 位置先给默认值，前端 layout_ai_grid 会立即重排到对应格子。
+    // 追问时复用同一 Webview（不导航不重载，保留当前聊天上下文）。
     let webview =
-        match get_or_create_ai_window(&app, &label, &cfg.name, &cfg.url, !follow_up, false) {
+        match ensure_embedded_webview(&app, &cfg.id, &cfg.url, &cfg.name, 0.0, 0.0, 520.0, 720.0) {
             Ok(w) => w,
             Err(e) => {
                 let _ = app.emit(
@@ -189,7 +204,7 @@ async fn run_one_ai(
                         ai_id: cfg.id.clone(),
                         ai_name: cfg.name.clone(),
                         task_id,
-                        text: Some(format!("打开内嵌窗口失败：{e}")),
+                        text: Some(format!("打开内嵌聊天页失败：{e}")),
                         url: None,
                     },
                 );
@@ -197,8 +212,8 @@ async fn run_one_ai(
             }
         };
 
-    // 记录该 AI 子窗口当前所在 URL（配置首页），供 show_ai_chat 差异导航：
-    // 请求地址与此一致（或页面已自行跳到会话页）时只显示不跳转，
+    // 记录该 AI 聊天页当前所在 URL（配置首页），供差异导航：
+    // 请求地址与此一致（或页面已自行跳到会话页）时只聚焦不跳转，
     // 避免重复 reload 打断进行中的流式回复。
     app.state::<AppState>()
         .ai_current_urls
@@ -334,11 +349,11 @@ async fn open_ai_webview(app: tauri::AppHandle, url: String) -> Result<(), Strin
     Ok(())
 }
 
-/// 展示某个 AI 的问答页窗口（顶部 chat tabs / 回答卡片「打开源会话」入口）。
-/// 复用提问时创建的隐藏 `ai-{aiId}` 子窗口（保留当前聊天状态）；
-/// 「差异导航」：仅当请求地址（如历史会话 chat/xxx）与窗口当前已知地址不同时
-/// 才跳转，避免点击当前会话的 tab 反复 reload 打断流式回复。
-/// 窗口不存在（如重启后回看历史会话）则以该会话 URL 新建可见窗口。
+/// 展示某个 AI 的聊天页（「打开源会话」入口）。
+/// 优先聚焦已 attach 到主窗口的 `ai-{aiId}` 聊天页（保留当前聊天状态）；
+/// 「差异导航」：仅当请求地址（如历史会话 chat/xxx）与当前已知地址不同时
+/// 才跳转，避免重复 reload 打断进行中的流式回复。
+/// 不存在（如重启后回看历史会话）则以该会话 URL 新建可见独立窗口兜底。
 #[tauri::command]
 async fn show_ai_chat(
     app: tauri::AppHandle,
@@ -349,10 +364,9 @@ async fn show_ai_chat(
 ) -> Result<(), String> {
     let label = format!("ai-{}", ai_id);
     let known = state.ai_current_urls.lock().await.get(&ai_id).cloned();
-    if let Some(w) = app.get_webview_window(&label) {
-        let _ = w.show();
+    if let Some(w) = app.get_webview(&label) {
         let _ = w.set_focus();
-        // 差异导航：请求地址与当前已知地址一致时仅显示，不重新加载页面
+        // 差异导航：请求地址与当前已知地址一致时仅聚焦，不重新加载页面
         if !url.is_empty() && known.as_deref() != Some(url.as_str()) {
             let js = format!("window.location.replace({:?})", url);
             let _ = w.eval(&js);
@@ -366,8 +380,19 @@ async fn show_ai_chat(
     Ok(())
 }
 
-/// 子窗口通过 __TAURI_INTERNALS__.invoke 回传回复；本命令转发为主窗口事件。
-/// 携带 `url`（回复发生时的页面地址）时，同时更新任务结果与窗口 URL 记录，
+/// 把多个 AI 聊天页按给定「田字格」布局放置到主窗口。
+/// 每个 cell 独立定位；width/height 为 0 的 cell 表示隐藏（放大单个 chat 时其余归零）。
+#[tauri::command]
+async fn layout_ai_grid(app: tauri::AppHandle, cells: Vec<GridCell>) -> Result<(), String> {
+    for c in cells {
+        let name = c.name.unwrap_or_else(|| "AskAll AI".into());
+        ensure_embedded_webview(&app, &c.ai_id, &c.url, &name, c.x, c.y, c.width, c.height)?;
+    }
+    Ok(())
+}
+
+/// AI 聊天页通过 __TAURI_INTERNALS__.invoke 回传回复；本命令转发为主窗口事件。
+/// 携带 `url`（回复发生时的页面地址）时，同时更新任务结果与 URL 记录（chat/xxx），
 /// 供前端「跳转对应会话」与历史回写使用。
 #[tauri::command]
 async fn emit_ai_reply(
@@ -457,6 +482,7 @@ pub fn run() {
             get_task,
             open_ai_webview,
             show_ai_chat,
+            layout_ai_grid,
             open_settings_window,
             emit_ai_reply,
             os_ask::request_accessibility_permission,
