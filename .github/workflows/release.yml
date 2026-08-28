@@ -33,7 +33,7 @@ jobs:
       notes_en: ${{ steps.read.outputs.NOTES_EN }}
       tag: ${{ steps.read.outputs.TAG }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Read version.json
         id: read
@@ -64,15 +64,16 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
+      # 由 package.json 的 packageManager 字段（pnpm@10.5.2）自动安装 pnpm，
+      # 不在此显式指定 version，避免与 packageManager 冲突（ERR_PNPM_BAD_PM_VERSION）
+      # 必须放在 setup-node 之前：行动自身需要 node 解析 packageManager 字段
+      - uses: pnpm/action-setup@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '24'
           cache: pnpm
 
       - name: Install dependencies
@@ -111,7 +112,7 @@ jobs:
           ls -la .output/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: extension-${{ matrix.browser }}-${{ env.VERSION }}
           path: .output/askall-${{ env.VERSION }}-${{ matrix.browser }}.zip
@@ -129,9 +130,9 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       # gh release 需要在 git 仓库上下文操作（创建 tag 等），必须先 checkout
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
 
