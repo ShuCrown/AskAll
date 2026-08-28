@@ -101,9 +101,16 @@ export default function GridChat({ convKey }: { convKey: string }) {
   // 每个格子的聊天页 DOM/native webview 都下移 CELL_HEADER_H，腾出顶部标题栏，
   // 标题栏（AI 名称 + 放大/收起按钮）因此露在页面之上、可交互。
   useEffect(() => {
-    const el = gridRef.current;
     const layoutFn = getPlatform().ask.layoutAiGrid;
-    if (!el || !layoutFn || ais.length === 0 || openMode !== 'embedded') return;
+    if (!layoutFn || openMode !== 'embedded') return;
+    const el = gridRef.current;
+    if (!el) return;
+
+    // 无 AI（空会话/新话题）时仍调一次清空布局：隐藏所有残留的 ai-* 聊天页
+    if (ais.length === 0) {
+      void layoutFn([]).catch(() => {});
+      return;
+    }
 
     const apply = () => {
       const r = el.getBoundingClientRect();
@@ -162,6 +169,17 @@ export default function GridChat({ convKey }: { convKey: string }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, [ais, focusKey, activeConvId, openMode]);
+
+  // 卸载（新话题切到空态 / 切换视图）时清空布局：隐藏所有内嵌 AI 聊天页，
+  // 避免旧的 chat 窗口仍显示于主窗口之上。
+  useEffect(() => {
+    return () => {
+      const layoutFn = getPlatform().ask.layoutAiGrid;
+      if (openMode === 'embedded' && layoutFn) {
+        layoutFn([]).catch(() => {});
+      }
+    };
+  }, [openMode]);
 
   const visibleAis = focusKey ? ais.filter((a) => keyOf(a) === focusKey) : ais;
 

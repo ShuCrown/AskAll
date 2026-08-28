@@ -22,7 +22,7 @@
 mod auto_send;
 mod os_ask;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -180,6 +180,7 @@ fn ensure_embedded_webview(
     if let Some(wv) = app.get_webview(&label) {
         let _ = wv.set_position(Position::Logical(pos));
         let _ = wv.set_size(Size::Logical(size));
+        let _ = wv.show();
         return Ok(wv);
     }
     let main = app.get_webview_window("main").ok_or("主窗口不存在")?;
@@ -428,8 +429,18 @@ async fn show_ai_chat(
 
 /// 把多个 AI 聊天页按给定「田字格」布局放置到主窗口。
 /// 每个 cell 独立定位；width/height 为 0 的 cell 表示隐藏（放大单个 chat 时其余归零）。
+/// 「精确可见」：仅当前 cells 列表中的 ai-* 聊天页显示并定位，
+/// 其余（如切换会话/新话题后残留的旧 chat）一律隐藏，避免旧窗口仍显示。
 #[tauri::command]
 async fn layout_ai_grid(app: tauri::AppHandle, cells: Vec<GridCell>) -> Result<(), String> {
+    let want: HashSet<String> = cells.iter().map(|c| c.ai_id.clone()).collect();
+    for (label, wv) in app.webviews() {
+        if let Some(id) = label.strip_prefix("ai-") {
+            if !want.contains(id) {
+                let _ = wv.hide();
+            }
+        }
+    }
     for c in cells {
         ensure_embedded_webview(&app, &c)?;
     }
