@@ -285,6 +285,8 @@ jobs:
           echo "Uploading ${#files[@]} file(s):"
           printf '%s\n' "${files[@]}"
 
+          # uploaded=1 表示本次确实执行了上传，随后需要校验产物完整性
+          uploaded=0
           if gh release view "$TAG" >/dev/null 2>&1; then
             is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
             if [ "$is_draft" = "true" ]; then
@@ -294,6 +296,7 @@ jobs:
                 --title "AskAll 齐问 v$VERSION" \
                 --notes-file RELEASE_NOTES.md \
                 --draft
+              uploaded=1
             else
               echo "Release $TAG 已正式发布，跳过自动更新"
             fi
@@ -304,4 +307,26 @@ jobs:
               --notes-file RELEASE_NOTES.md \
               --draft \
               "${files[@]}"
+            uploaded=1
+          fi
+
+          # 上传后校验：逐一确认本地产物都已出现在 release assets 中，防止静默丢失
+          if [ "$uploaded" = "1" ]; then
+            echo "=== 校验产物是否全部上传成功 ==="
+            gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/release_assets.txt
+            missing=0
+            for f in "${files[@]}"; do
+              base=$(basename "$f")
+              if ! grep -qxF "$base" /tmp/release_assets.txt; then
+                echo "::error::Release 缺少产物: $base"
+                missing=1
+              fi
+            done
+            if [ "$missing" -ne 0 ]; then
+              echo "::error::产物上传校验失败，请检查上面的缺失列表"
+              echo "当前 Release assets："
+              cat /tmp/release_assets.txt
+              exit 1
+            fi
+            echo "校验通过：${#files[@]} 个产物均已上传到 Release $TAG"
           fi
