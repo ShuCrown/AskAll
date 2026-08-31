@@ -9,13 +9,6 @@ import { Switch } from './ui/switch';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
 import {
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
-} from './ui/select';
-import {
   Table,
   TableHeader,
   TableBody,
@@ -26,13 +19,7 @@ import {
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 
-export default function AiConfigPanel({
-  openMode,
-  onModeChange,
-}: {
-  openMode: 'embedded' | 'browser';
-  onModeChange: (mode: 'embedded' | 'browser') => void;
-}) {
+export default function AiConfigPanel() {
   const [aiConfigs, setAiConfigs] = useState<AiConfig[]>([]);
   const [notifyOnDone, setNotifyOnDone] = useState(true);
 
@@ -96,22 +83,6 @@ export default function AiConfigPanel({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-2">
-        <div className="flex h-12 items-center justify-between rounded-lg border bg-card px-3">
-          <Label className="text-sm text-muted-foreground">打开方式</Label>
-          <Select
-            value={openMode}
-            onValueChange={(v) => onModeChange(v as 'embedded' | 'browser')}
-          >
-            <SelectTrigger className="w-[130px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="embedded">应用内嵌窗口</SelectItem>
-              <SelectItem value="browser">系统浏览器</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
         <div className="flex h-12 items-center justify-between rounded-lg border bg-card px-3">
           <Label className="text-sm text-muted-foreground">回答完成提醒</Label>
           <Switch checked={notifyOnDone} onCheckedChange={toggleNotify} />

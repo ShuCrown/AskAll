@@ -91,6 +91,11 @@ export interface PlatformAsk {
    */
   openAiTab(url: string, aiId?: string, name?: string): Promise<void>;
   /**
+   * 在系统浏览器/新标签页打开 URL（外链）。
+   * 桌面端走系统默认浏览器；扩展端新开浏览器标签页。
+   */
+  openExternal(url: string): Promise<void>;
+  /**
    * 桌面端田字格布局：把各 AI 聊天页按 cells 定位到主窗口。
    * 扩展端无此能力，组件需先探测存在性。
    */

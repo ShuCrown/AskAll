@@ -3,6 +3,11 @@ import type { AiSelectors } from './aiConfig';
 /**
  * 注入到 AI 页面的自动填充并发送函数。
  *
+ * @deprecated 已被 `automation/runAutomation` 取代，扩展端不再调用本函数。
+ * 旧实现的定位、填入、提交、抓取四步全部建立在站点 DOM 选择器之上，
+ * 站点改版即失效（豆包 2026 改版导致 `#flow-end-msg-send` 消失即为此例）。
+ * 新引擎把流程固化成 Recipe，每步挂策略降级链并带自愈记忆，留作旧版兼容参考。
+ *
  * 注意：该函数会被 `browser.scripting.executeScript` 注入到目标页面，
  * 运行在页面上下文（MAIN world），因此必须写成「纯函数」——不能引用任何外部变量、
  * 模块、闭包，所有依赖都必须通过 args 传入。
@@ -43,6 +48,25 @@ export async function autoFillAndSend(
   taskId: string,
   aiId: string,
 ) {
+  // 后台标签页节流对抗：AI 标签页打开后一直处于后台，部分站点（如 DeepSeek）
+  // 会依据 document.hidden 暂停流式数据的消费与 DOM 渲染，Chrome 本身也会节流
+  // 隐藏页定时器——表现为面板停在「正在发送」，直到用户切到该页才一次性更新。
+  // 覆写可见性 getter 让页面始终认为「可见」，促使它继续推送/渲染，
+  // MutationObserver 才能持续抓到回答。
+  try {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => false,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  } catch {
+    /* 不可覆写则维持原行为 */
+  }
+
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   // 判断 contenteditable 编辑器是否已包含目标文本（用于判断输入是否真正写入编辑器模型）
@@ -105,7 +129,12 @@ export async function autoFillAndSend(
         ? [selectors.input]
         : [];
     for (const sel of candidates) {
-      const nodes = document.querySelectorAll<HTMLElement>(sel);
+      let nodes: NodeListOf<HTMLElement>;
+      try {
+        nodes = document.querySelectorAll<HTMLElement>(sel);
+      } catch {
+        continue; // 非法选择器：跳过该候选而非抛错中断
+      }
       for (const el of nodes) {
         if (isVisible(el) && isEditable(el)) return el;
       }
@@ -205,6 +234,29 @@ export async function autoFillAndSend(
     return;
   }
 
+  // ——— 发送前基线：URL + 回答区最后一条文本 ———
+  // 成功判定 = 输入框清空 / URL 跳转到会话页 / 回答区出现新文本，三者任一。
+  // 单看「输入框清空」在 contenteditable 编辑器（DeepSeek 等）上会因残留
+  // 零宽节点/延迟重渲染而误判「未发送」，导致实际发送成功却回退兜底文案。
+  const initialHref = location.href;
+  const extractReplyText = (): string => {
+    const cands = selectors.replyCandidates?.length
+      ? selectors.replyCandidates
+      : ['[class*="markdown"]', '[class*="answer"]', '[class*="response"]'];
+    for (const sel of cands) {
+      try {
+        const nodes = document.querySelectorAll(sel);
+        if (nodes.length > 0) {
+          return (nodes[nodes.length - 1]?.textContent || '').trim();
+        }
+      } catch {
+        /* 非法选择器忽略 */
+      }
+    }
+    return '';
+  };
+  const baselineReply = extractReplyText();
+
   sendToBackground({ type: 'AI_SENDING', aiName, taskId, aiId });
 
   // 聚焦并设置值
@@ -285,6 +337,30 @@ export async function autoFillAndSend(
         /* ignore */
       }
     }
+
+    if (!editorContainsText(input, text)) {
+      // 最后一招：直接写 DOM 并派发 input 事件。
+      // ProseMirror/TipTap（豆包新版输入框）通过自身 DOMObserver 监听变更，
+      // 会在收到 mutation/input 后把 DOM 同步回编辑器状态模型。
+      try {
+        input.textContent = text;
+        const endRange = document.createRange();
+        endRange.selectNodeContents(input);
+        endRange.collapse(false);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(endRange);
+        input.dispatchEvent(
+          new InputEvent('input', {
+            bubbles: true,
+            inputType: 'insertText',
+            data: text,
+          }),
+        );
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   await wait(150);
@@ -327,12 +403,20 @@ export async function autoFillAndSend(
     return v.trim().length === 0;
   };
 
+  /** 发送成功多维判定：输入框清空 / URL 跳转 / 回答区出现新文本，任一成立 */
+  const sendConfirmed = (): boolean => {
+    if (inputCleared()) return true;
+    if (location.href !== initialHref) return true;
+    const cur = extractReplyText();
+    return cur.length > 0 && cur !== baselineReply;
+  };
+
   const clickAndVerify = async (btn: HTMLElement, waitMs: number) => {
     clickBtn(btn);
     const start = Date.now();
     while (Date.now() - start < waitMs) {
       await wait(150);
-      if (inputCleared()) return true;
+      if (sendConfirmed()) return true;
     }
     return false;
   };
@@ -385,11 +469,20 @@ export async function autoFillAndSend(
     ];
     const specific = candidates[0];
 
+    // 配置里的选择器可能因站点改版变得不合法，querySelector 抛错会静默中断
+    // 整个注入脚本（面板将永远停在「正在发送」），这里统一做安全查询
+    const qsSafe = (sel?: string | null): HTMLElement | null => {
+      if (!sel) return null;
+      try {
+        return document.querySelector<HTMLElement>(sel);
+      } catch {
+        return null;
+      }
+    };
+
     // 阶段1：等专属按钮（最具体）可用后点击并验证
     for (let attempt = 0; attempt < 20 && !sent; attempt++) {
-      const btn = specific
-        ? document.querySelector<HTMLElement>(specific)
-        : null;
+      const btn = qsSafe(specific);
       if (btn && !isBtnDisabled(btn)) {
         sent = await clickAndVerify(btn, 2500);
       }
@@ -398,7 +491,7 @@ export async function autoFillAndSend(
 
     // 阶段2：专属按钮点击后输入未被清空，再尝试一次
     if (!sent && specific) {
-      const btn = document.querySelector<HTMLElement>(specific);
+      const btn = qsSafe(specific);
       if (btn && !isBtnDisabled(btn)) {
         sent = await clickAndVerify(btn, 2000);
       }
@@ -406,9 +499,7 @@ export async function autoFillAndSend(
 
     // 阶段3：遍历其余安全候选（均带 id/aria-label/class，不含宽泛 div[role="button"]）
     for (let c = 1; c < candidates.length && !sent; c++) {
-      const sel = candidates[c];
-      if (!sel) continue;
-      const btn = document.querySelector<HTMLElement>(sel);
+      const btn = qsSafe(candidates[c]);
       if (btn && !isBtnDisabled(btn)) {
         sent = await clickAndVerify(btn, 2000);
       }
@@ -441,7 +532,19 @@ export async function autoFillAndSend(
     const start = Date.now();
     while (Date.now() - start < 2500) {
       await wait(200);
-      if (inputCleared()) break;
+      // 回车真实发送成功时也要置 sent，否则会被最终兜底误报「未能自动发送」
+      if (sendConfirmed()) {
+        sent = true;
+        break;
+      }
+    }
+  }
+
+  // 最终宽限：点击/回车可能已生效，只是 DOM 清空或跳转滞后，再复核几轮
+  if (!sent) {
+    for (let g = 0; g < 5 && !sent; g++) {
+      await wait(300);
+      if (sendConfirmed()) sent = true;
     }
   }
 
@@ -483,7 +586,12 @@ export async function autoFillAndSend(
     const extract = (): string => {
       let replyEl: Element | null = null;
       for (const sel of candidates) {
-        const nodes = document.querySelectorAll(sel);
+        let nodes: NodeListOf<Element>;
+        try {
+          nodes = document.querySelectorAll(sel);
+        } catch {
+          continue; // 非法选择器：跳过该候选
+        }
         if (nodes.length > 0) {
           replyEl = nodes[nodes.length - 1] ?? null;
           break;
@@ -510,6 +618,17 @@ export async function autoFillAndSend(
     const check = () => {
       if (Date.now() - startedAt > TIMEOUT) {
         finish();
+        // 等待超时也必须给面板一个终态（兜底文案会被识别为异常快照），
+        // 否则选择器失配的平台会永远停在「正在发送/正在生成回答…」
+        sendToBackground({
+          type: 'AI_REPLY_DONE',
+          aiName: name,
+          taskId: tid,
+          aiId: aid,
+          text:
+            lastText ||
+            '【AskAll】等待回答超时：未能抓取到回答文本，若平台已回答请点「查看原文」。',
+        });
         return;
       }
       const text = extract();

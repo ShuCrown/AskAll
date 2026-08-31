@@ -5,8 +5,9 @@
   "type": "module",
   "description": "AskAll 齐问 桌面端 —— Tauri 桌面应用，与浏览器扩展共用同一套 UI",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build:engine": "node scripts/build-engine.mjs",
+    "dev": "pnpm build:engine && vite",
+    "build": "pnpm build:engine && tsc -b && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
@@ -23,6 +24,7 @@
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
+    "esbuild": "^0.21.5",
     "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

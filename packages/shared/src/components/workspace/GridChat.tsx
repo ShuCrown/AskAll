@@ -16,15 +16,12 @@
  * 使标题栏露在 webview 之上、可正常点击放大/收起。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, Maximize2, Minimize2 } from 'lucide-react';
-import { getPlatform, type OpenMode } from '../../lib/platform';
+import { ExternalLink, Loader2, Maximize, Minimize } from 'lucide-react';
+import { getPlatform } from '../../lib/platform';
 import { useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
 import type { AiStatus } from '../../utils/task';
 import AiIcon from './AiIcon';
-
-/** 「打开方式」存储键（与 shared App.tsx / platform-tauri 一致） */
-const OPEN_MODE_KEY = 'local:openMode';
 
 /** 会话内单个 AI 聊天页（id 可能缺失：极旧的历史数据只有 name/url） */
 interface GridAi {
@@ -52,15 +49,6 @@ export default function GridChat({ convKey }: { convKey: string }) {
   /** 放大中的 AI key（id ?? name）；null = 田字格视图 */
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  /** 打开方式：embedded = 聊天页 attach 到主窗口网格；browser = 系统浏览器打开（不布局） */
-  const [openMode, setOpenMode] = useState<OpenMode | null>(null);
-
-  useEffect(() => {
-    getPlatform()
-      .storage.getItem<OpenMode>(OPEN_MODE_KEY)
-      .then((v) => setOpenMode(v === 'browser' ? 'browser' : 'embedded'))
-      .catch(() => setOpenMode('embedded'));
-  }, []);
 
   // 当前会话参与过的 AI：历史侧先入表（旧轮次打底），实时任务后入表覆盖（URL 最新）
   const ais = useMemo<GridAi[]>(() => {
@@ -101,12 +89,12 @@ export default function GridChat({ convKey }: { convKey: string }) {
   }, [activeConvId]);
 
   // 布局：把各聊天页摆到对应格子（放大 = focus 格铺满网格区，其余隐藏）。
-  // browser 模式不注入本地网格（聊天页在系统浏览器打开），跳过布局。
+  // 桌面端固定内嵌：始终把聊天页 attach 到主窗口网格（不再有系统浏览器模式）。
   // 每个格子的聊天页 DOM/native webview 都下移 CELL_HEADER_H，腾出顶部标题栏，
   // 标题栏（AI 名称 + 放大/收起按钮）因此露在页面之上、可交互。
   useEffect(() => {
     const layoutFn = getPlatform().ask.layoutAiGrid;
-    if (!layoutFn || openMode !== 'embedded') return;
+    if (!layoutFn) return;
     const el = gridRef.current;
     if (!el) return;
 
@@ -174,18 +162,18 @@ export default function GridChat({ convKey }: { convKey: string }) {
     const ro = new ResizeObserver(apply);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [ais, focusKey, activeConvId, openMode]);
+  }, [ais, focusKey, activeConvId]);
 
   // 卸载（新话题切到空态 / 切换视图）时清空布局：隐藏所有内嵌 AI 聊天页，
   // 避免旧的 chat 窗口仍显示于主窗口之上。
   useEffect(() => {
     return () => {
       const layoutFn = getPlatform().ask.layoutAiGrid;
-      if (openMode === 'embedded' && layoutFn) {
+      if (layoutFn) {
         layoutFn([]).catch(() => {});
       }
     };
-  }, [openMode]);
+  }, []);
 
   const visibleAis = focusKey ? ais.filter((a) => keyOf(a) === focusKey) : ais;
 
@@ -200,14 +188,14 @@ export default function GridChat({ convKey }: { convKey: string }) {
         ) : focusKey && visibleAis[0] ? (
           <GridCellView
             ai={visibleAis[0]}
-            embedded={openMode === 'embedded'}
+            embedded
             focused
             onFocus={setFocusKey}
           />
         ) : (
           <GridCells
             ais={ais}
-            embedded={openMode === 'embedded'}
+            embedded
             onFocus={setFocusKey}
           />
         )}
@@ -272,7 +260,7 @@ function GridCellView({
       )}
       style={{ height: focused ? '100%' : undefined }}
     >
-      {/* 标题栏：左 AI 名称，右 放大/收起 */}
+      {/* 标题栏：左 AI 名称，右 外链打开 + 放大/收起（统一四角箭头图标） */}
       <div
         className="flex shrink-0 items-center gap-1.5 border-b px-2"
         style={{ height: CELL_HEADER_H }}
@@ -284,16 +272,29 @@ function GridCellView({
         {embedded && !focused && (
           <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
         )}
+        {/* 外链打开：在系统浏览器中打开该会话 */}
+        {ai.url && (
+          <button
+            type="button"
+            onClick={() =>
+              getPlatform().ask.openExternal(ai.url).catch(() => {})
+            }
+            title="在浏览器中打开该会话"
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button
           type="button"
           onClick={() => onFocus(focused ? null : (ai.id ?? ai.name))}
           title={focused ? `收起 ${ai.name}，回到田字格` : `放大 ${ai.name}，铺满本窗口`}
-          className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="ml-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           {focused ? (
-            <Minimize2 className="h-3.5 w-3.5" />
+            <Minimize className="h-3.5 w-3.5" />
           ) : (
-            <Maximize2 className="h-3.5 w-3.5" />
+            <Maximize className="h-3.5 w-3.5" />
           )}
         </button>
       </div>

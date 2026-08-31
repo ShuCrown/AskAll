@@ -180,7 +180,7 @@ export default function Workspace({
     ) : null;
 
   const mainCard = (
-    <div className="absolute inset-0 flex flex-col pl-3 pt-4 pr-4">
+    <div className="absolute inset-0 flex flex-col bg-card pl-3 pt-4 pr-4">
       {!sidebarOpen && <div className="h-14 shrink-0" aria-hidden="true" />}
       <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
       {bottomComposer && (

@@ -1,7 +1,11 @@
 import {
   DEFAULT_AI_CONFIGS,
   mergeConfigs,
-  autoFillAndSend,
+  runAutomation,
+  resolveRecipe,
+  loadMemory,
+  applyMemory,
+  recordStepResult,
   addHistory,
   updateHistoryUrl,
   mergeAnswer,
@@ -9,11 +13,12 @@ import {
   type AiConfig,
   type AskTask,
   type AiResult,
+  type StepReport,
+  type AutomationMemory,
 } from '@askall/shared';
 import { initExtensionPlatform } from '../src/platform';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
-const OPEN_MODE_KEY = 'local:openMode';
 const MENU_ID = 'ask-multi-ai';
 
 export default defineBackground(() => {
@@ -38,10 +43,9 @@ export default defineBackground(() => {
   });
 
   // 右键菜单点击：在当前标签页上方弹出浮动面板（划词文本预填，无划词为空白新话题），
-  // 由用户在面板中确认发送——与应用「新话题 → 输入 → 发起」的节奏一致。
-  // 若内容脚本未注入（页面在扩展安装/更新前已打开，浏览器不会向旧页面注入），
-  // 先动态注入内容脚本再重试；只有注入也失败（chrome:// 等受限页面）时，
-  // 有划词才回退为直接发送，无划词则只能放弃。
+  // 由用户在面板中确认发送——绝不自动直发。
+  // 若内容脚本未注入（页面在扩展安装/更新前已打开），先动态注入内容脚本并重试；
+  // 仍失败（受限页面等）只发系统通知提示，不再回退为直接发送。
   browser.contextMenus.onClicked.addListener(async (info) => {
     if (info.menuItemId !== MENU_ID) return;
     const tabs = await browser.tabs.query({
@@ -57,23 +61,57 @@ export default defineBackground(() => {
         text: info.selectionText ?? '',
       });
 
+    // 动态注入后，内容脚本监听器注册与注入 Promise 之间可能有微小竞态：多重试几轮
+    const showPanelRetry = async () => {
+      for (let i = 0; i < 4; i++) {
+        try {
+          await showPanel();
+          return true;
+        } catch {
+          await sleep(150);
+        }
+      }
+      return false;
+    };
+
     try {
       await showPanel();
     } catch (e) {
-      // 先动态注入内容脚本，再重试打开面板
+      console.warn('[multi-ai-ask] 内容脚本未就绪，尝试动态注入:', e);
       try {
         await browser.scripting.executeScript({
           target: { tabId },
           files: ['/content-scripts/content.js'],
         });
-        await showPanel();
+        if (await showPanelRetry()) return;
+        console.warn('[multi-ai-ask] 注入后仍无法打开面板');
       } catch (err) {
-        // 受限页面无法注入：有划词时回退为直接发送，无划词只能放弃
         console.warn('[multi-ai-ask] 无法注入内容脚本:', err);
-        if (info.selectionText) handleAsk(info.selectionText);
       }
+      // 失败终态：通知用户，而不是把问答直接发出去
+      notifyPanelUnavailable();
     }
   });
+
+  /** 扩展资源完整 URL（绕开 WXT 模板字面量类型限制） */
+  function getExtURL(path: string): string {
+    return (browser.runtime.getURL as (p: string) => string)(path);
+  }
+
+  /** 面板无法弹出时的系统通知（替代旧的「直接发送」回退） */
+  async function notifyPanelUnavailable() {
+    try {
+      await browser.notifications.create({
+        type: 'basic',
+        iconUrl: getExtURL('icon/128.png'),
+        title: 'AskAll 齐问',
+        message:
+          '当前页面无法打开问答面板（受限页面或脚本未就绪），请在普通网页中重试。',
+      });
+    } catch (e) {
+      console.warn('[multi-ai-ask] 通知失败:', e);
+    }
+  }
 
   // 任务级结果缓存：taskId -> AskTask。以「任务 × AI」为维度，避免多轮互相覆盖。
   const tasks = new Map<string, AskTask>();
@@ -95,6 +133,25 @@ export default defineBackground(() => {
     task.results[aiId] = { ...cur, ...patch };
   }
 
+  /**
+   * 回复进度广播：问答面板运行在发起页的 content script 中，而
+   * runtime.sendMessage 只会送达扩展页面（popup/options），不会送达
+   * content script。因此后台收到 AI 标签页转发的进度后，必须逐 tab
+   * 用 tabs.sendMessage 再转发一次，面板的 onReply 才能收到并实时更新。
+   * （未注入内容脚本或无监听的 tab 会 reject，忽略即可。）
+   */
+  function broadcastReply(msg: Record<string, unknown>) {
+    void browser.tabs
+      .query({})
+      .then((tabs) => {
+        for (const t of tabs) {
+          if (t.id == null) continue;
+          browser.tabs.sendMessage(t.id, msg).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }
+
   // 监听内容脚本消息（划词浮动面板 + 回答完成 + 打开设置）
   // 注意：WXT 的 browser 在 Chrome 下是原生 chrome API，监听器「返回值」不会作为
   // 响应送达（Firefox 的 Promise 返回也不接受普通对象），必须走 sendResponse 同步回传。
@@ -109,14 +166,29 @@ export default defineBackground(() => {
     }
     // 发送中/流式/完成：由 autoSend 经 content script 桥接转发而来。
     // 携带 url（真实会话页 chat/xxx）时同步写入任务结果，供跳转对应会话。
+    // 三类消息均原样广播回各 tab 的 content script（问答面板实时更新的唯一来源）。
     if (msg?.type === 'AI_SENDING' && msg.aiId) {
       updateResult(msg.taskId, msg.aiId, { status: 'sending' });
+      broadcastReply({
+        type: 'AI_SENDING',
+        taskId: msg.taskId,
+        aiId: msg.aiId,
+        aiName: msg.aiName,
+      });
       return;
     }
     if (msg?.type === 'AI_REPLY' && msg.aiName && msg.aiId) {
       updateResult(msg.taskId, msg.aiId, {
         status: 'streaming',
         answer: msg.text ?? '',
+        ...(typeof msg.url === 'string' && msg.url ? { url: msg.url } : {}),
+      });
+      broadcastReply({
+        type: 'AI_REPLY',
+        taskId: msg.taskId,
+        aiId: msg.aiId,
+        aiName: msg.aiName,
+        text: msg.text ?? '',
         ...(typeof msg.url === 'string' && msg.url ? { url: msg.url } : {}),
       });
       return;
@@ -127,12 +199,40 @@ export default defineBackground(() => {
         answer: msg.text ?? '',
         ...(typeof msg.url === 'string' && msg.url ? { url: msg.url } : {}),
       });
+      broadcastReply({
+        type: 'AI_REPLY_DONE',
+        taskId: msg.taskId,
+        aiId: msg.aiId,
+        aiName: msg.aiName,
+        text: msg.text ?? '',
+        ...(typeof msg.url === 'string' && msg.url ? { url: msg.url } : {}),
+      });
       // 回答快照落盘：写入对应历史条目，供工作台回放（兜底文案会被标记为 error）
       const task = msg.taskId ? tasks.get(msg.taskId) : undefined;
       if (task?.historyId) {
         void mergeAnswer(task.historyId, msg.aiId, msg.aiName, msg.text ?? '');
       }
       notifyReplyDone(msg.aiName);
+      return;
+    }
+    // 自愈记忆：页面引擎回传每步「用了哪个策略、是否成功」。
+    // 据此把真正生效的策略提到链首，站点改版后不必每次都从失效的选择器开始试错。
+    if (msg?.type === 'ASKALL_STEP_RESULT' && msg.recipeId) {
+      const report: StepReport = {
+        recipeId: msg.recipeId,
+        stepId: msg.stepId,
+        kind: msg.kind,
+        ok: msg.ok === true,
+        reason: typeof msg.reason === 'string' ? msg.reason : undefined,
+        snapshot: msg.snapshot as StepReport['snapshot'],
+      };
+      void recordStepResult(report);
+      if (!report.ok) {
+        console.warn(
+          `[multi-ai-ask] ${report.recipeId} · ${report.stepId} 策略 ${report.kind} 未生效:`,
+          report.reason ?? '',
+        );
+      }
       return;
     }
     if (msg?.type === 'GET_TASK') {
@@ -266,15 +366,13 @@ export default defineBackground(() => {
     const aiConfigs = mergeConfigs(
       (await storage.getItem(AI_CONFIGS_KEY)) as AiConfig[] | null,
     );
-    const openMode =
-      ((await storage.getItem(OPEN_MODE_KEY)) as 'tabs' | 'windows' | null) ??
-      'tabs';
-    return { aiConfigs, openMode };
+    // 打开方式设置已移除：扩展端固定用浏览器标签页展示各 AI 聊天
+    return { aiConfigs };
   }
 
-  /** 一次性提问：新建一个任务（新会话），并行打开/复用各 AI 标签页并发送 */
+  /** 一次性提问：新建一个任务（新会话），并行打开各 AI 标签页并发送 */
   async function handleAsk(text: string, aiIds?: string[]) {
-    const { aiConfigs, openMode } = await loadContext();
+    const { aiConfigs } = await loadContext();
     const enabledList = aiConfigs.filter((ai) => {
       if (!ai.enabled || !ai.url) return false;
       if (Array.isArray(aiIds) && aiIds.length > 0) {
@@ -286,6 +384,9 @@ export default defineBackground(() => {
 
     const question = text.trim();
     if (!question) return;
+
+    // 自愈记忆一次性读取，供各 AI 的 Recipe 重排策略顺序
+    const memory = await loadMemory();
 
     // 新建任务 + 新会话
     const taskId = genId();
@@ -324,55 +425,31 @@ export default defineBackground(() => {
     // 回填历史条目 id：AI_REPLY_DONE 时据此把回答快照写入正确的历史记录
     task.historyId = historyItem.id;
 
-    let winIndex = 0;
     for (const ai of enabledList) {
-      // 需要自动发送的平台：优先复用已打开的「原有」聊天窗口
-      if (ai.autoSend && ai.selectors) {
+      // 需要自动发送的平台：优先复用已打开的「原有」聊天窗口。
+      // 不再要求 ai.selectors —— 没有专属配置的站点走通用 Recipe 照样能跑。
+      if (ai.autoSend) {
         const existing = await findExistingChatTab(ai);
         if (existing) {
           trackTab(existing.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
-          injectAutoSend(
-            existing.tabId,
-            question,
-            ai.selectors,
-            ai.name,
-            taskId,
-            ai.id,
-          );
+          injectAutomation(existing.tabId, question, ai, taskId, memory);
           continue;
         }
       }
 
-      // 否则新建标签页/窗口
+      // 否则新建标签页（扩展端固定用浏览器标签页展示，后台打开不抢占焦点）
       const url = buildUrl(ai, question);
       const open = (tabId: number) => {
         trackTab(tabId, historyItem.id, ai.id, ai.name, url);
-        if (ai.autoSend && ai.selectors) {
-          injectAutoSend(tabId, question, ai.selectors, ai.name, taskId, ai.id);
+        if (ai.autoSend) {
+          injectAutomation(tabId, question, ai, taskId, memory);
         }
       };
-      if (openMode === 'windows') {
-        browser.windows
-          .create({
-            url,
-            type: 'popup',
-            width: 520,
-            height: 760,
-            left: 80 + winIndex * 40,
-            top: 80 + winIndex * 40,
-          })
-          .then((win) => {
-            const tabId = win?.tabs?.[0]?.id;
-            if (tabId != null) open(tabId);
-          });
-      } else {
-        browser.tabs
-          .create({ url, active: false })
-          .then((tab) => {
-            if (tab.id != null) open(tab.id);
-          });
-      }
-      winIndex++;
+      browser.tabs
+        .create({ url, active: false })
+        .then((tab) => {
+          if (tab.id != null) open(tab.id);
+        });
     }
   }
 
@@ -393,6 +470,9 @@ export default defineBackground(() => {
       return true;
     });
     if (targets.length === 0) return;
+
+    // 自愈记忆一次性读取，供各 AI 的 Recipe 重排策略顺序
+    const memory = await loadMemory();
 
     // 延续上一个会话；若没有（如后台重启后），则作为新会话发起
     const conversationId = currentConversationId ?? genId();
@@ -435,12 +515,12 @@ export default defineBackground(() => {
     // 优先复用已打开的「原有」聊天窗口
     const reused = new Set<string>();
     for (const ai of targets) {
-      if (!ai.autoSend || !ai.selectors || reused.has(ai.id)) continue;
+      if (!ai.autoSend || reused.has(ai.id)) continue;
       const existing = await findExistingChatTab(ai);
       if (existing) {
         reused.add(ai.id);
         trackTab(existing.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
-        injectAutoSend(existing.tabId, question, ai.selectors, ai.name, taskId, ai.id);
+        injectAutomation(existing.tabId, question, ai, taskId, memory);
       }
     }
 
@@ -460,6 +540,11 @@ export default defineBackground(() => {
 
   /**
    * 查找某个 AI 已打开的聊天标签页（跨后台会话也能命中）。
+   *
+   * 复用前强制刷新一次：旧标签页可能是在可见性伪装（visible-fake）生效前
+   * 打开的——content script 只对新导航注入，旧页面里站点仍处于懒渲染状态
+   * （组件不挂载/发送按钮不渲染）；也可能残留上一次发送未清掉的草稿。
+   * 重载后伪装脚本注入、页面回到干净的可自动化状态。
    */
   async function findExistingChatTab(
     ai: AiConfig,
@@ -469,9 +554,21 @@ export default defineBackground(() => {
       if (!origin) return undefined;
       const tabs = await browser.tabs.query({ url: `${origin}/*` });
       const ready = tabs.find((t) => t.id != null && t.status === 'complete');
-      if (ready && ready.id != null) return { tabId: ready.id };
-      if (tabs[0]?.id != null) return { tabId: tabs[0].id };
-      return undefined;
+      const target = ready ?? tabs[0];
+      if (target?.id == null) return undefined;
+      const tabId = target.id;
+      try {
+        await browser.tabs.reload(tabId);
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const t = await browser.tabs.get(tabId);
+          if (t.status === 'complete') break;
+          await sleep(250);
+        }
+      } catch {
+        /* 标签页已关闭等，忽略 */
+      }
+      return { tabId };
     } catch {
       return undefined;
     }
@@ -512,20 +609,77 @@ export default defineBackground(() => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   /**
-   * 注入自动发送脚本。不再阻塞等待 tab.status === complete——
-   * 页面只要加载到可注入的程度就立即注入，autoFillAndSend 内部会通过
-   * MutationObserver 等待输入框出现。注入失败（页面尚未就绪）时快速重试。
-   * 各标签页互不等待，实现真正并发发送。
+   * 补注入 MAIN↔ISOLATED 回复桥。
+   *
+   * 复用的 AI 标签页可能是「扩展安装/刷新前就已打开」的旧页面——浏览器不会
+   * 向旧页面注入 content script，autoSend 在 MAIN world 派发的 askall:ai-reply
+   * 事件就没人转发到后台，面板会一直停在「正在打开页面…」。
+   * 这里对该 tab 手动注入一份 ISOLATED 桥：脚本幂等（检测 content.tsx 设置的
+   * 全局标记，已存在则跳过），注入失败（受限页面）忽略。
    */
-  async function injectAutoSend(
+  async function ensureReplyBridge(tabId: number) {
+    try {
+      await browser.scripting.executeScript({
+        target: { tabId },
+        world: 'ISOLATED',
+        func: () => {
+          const w = globalThis as Record<string, unknown>;
+          if (w.__askallReplyBridge) return;
+          w.__askallReplyBridge = true;
+          window.addEventListener(
+            'askall:ai-reply',
+            ((e: CustomEvent<Record<string, unknown>>) => {
+              const msg = e.detail;
+              if (!msg || typeof msg.type !== 'string') return;
+              try {
+                // 序列化注入的函数必须自包含：不能引用模块作用域的 browser，
+                // ISOLATED world 里用页面全局的 chrome.runtime 回传后台
+                const runtime = (
+                  globalThis as unknown as {
+                    chrome?: {
+                      runtime?: { sendMessage?: (m: unknown) => unknown };
+                    };
+                  }
+                ).chrome?.runtime;
+                if (!runtime?.sendMessage) return;
+                const p = runtime.sendMessage(msg);
+                if (p && typeof (p as Promise<void>).catch === 'function') {
+                  (p as Promise<void>).catch(() => {});
+                }
+              } catch {
+                /* 无扩展上下文，忽略 */
+              }
+            }) as EventListener,
+          );
+        },
+      });
+    } catch {
+      /* 受限页面等，忽略 */
+    }
+  }
+
+  /**
+   * 注入自动化引擎。不再阻塞等待 tab.status === complete——
+   * 页面只要加载到可注入的程度就立即注入，引擎内部会等待输入框出现。
+   * 注入失败（页面尚未就绪）时快速重试。各标签页互不等待，实现真正并发发送。
+   *
+   * 注入前用自愈记忆重排 Recipe：历史上真正生效的策略会被提到链首，
+   * 站点改版后不必每次都从失效的选择器开始逐级试错。
+   */
+  async function injectAutomation(
     tabId: number,
     text: string,
-    selectors: AiConfig['selectors'],
-    aiName: string,
+    ai: AiConfig,
     taskId: string,
-    aiId: string,
+    memory?: AutomationMemory,
   ) {
-    if (!selectors) return;
+    // 先补桥再注入：保证引擎一旦派发进度就能被转发回后台
+    void ensureReplyBridge(tabId);
+
+    const base = resolveRecipe(ai.id, ai.name, ai.url);
+    const recipe = applyMemory(base, memory ?? (await loadMemory()));
+    const meta = { aiName: ai.name, aiId: ai.id, taskId };
+
     const deadline = Date.now() + 20000;
     for (let attempt = 0; attempt < 80; attempt++) {
       try {
@@ -534,15 +688,15 @@ export default defineBackground(() => {
           // 在 MAIN world 运行：部分 AI 站点（豆包/DeepSeek）的 React 事件
           // 只在 MAIN world 下响应合成事件，ISOLATED world 派发的 input/click 不生效
           world: 'MAIN',
-          func: autoFillAndSend,
-          args: [text, selectors, aiName, taskId, aiId],
+          func: runAutomation,
+          args: [text, recipe, meta],
         });
         return;
       } catch (e) {
         // 页面尚未就绪（executeScript 会抛错），快速重试
         if (Date.now() > deadline) {
-          console.warn(`[multi-ai-ask] 注入超时（${aiName}）:`, e);
-          updateResult(taskId, aiId, {
+          console.warn(`[multi-ai-ask] 注入超时（${ai.name}）:`, e);
+          updateResult(taskId, ai.id, {
             status: 'error',
             error: '注入超时，未能自动发送',
           });

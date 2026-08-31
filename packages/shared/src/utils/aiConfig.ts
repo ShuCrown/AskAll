@@ -90,25 +90,32 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
     autoSend: true,
     isDefault: true,
     selectors: {
-      input: 'textarea.semi-input-textarea-autosize',
+      // 2026 改版：输入框由 Semi textarea 换成 TipTap/ProseMirror contenteditable
+      input: '.tiptap.ProseMirror',
       inputCandidates: [
+        '.tiptap.ProseMirror',
+        'div[contenteditable="true"]',
+        'div[role="textbox"]',
         'textarea.semi-input-textarea-autosize',
         'textarea[placeholder]',
         'textarea',
-        'div[contenteditable="true"]',
-        'div[role="textbox"]',
       ],
       sendButton: '#flow-end-msg-send',
-      // 移除 div[role="button"]、button:has(svg) 等宽泛选择器，避免误点击工具栏
+      // 移除 div[role="button"]、button:has(svg) 等宽泛选择器，避免误点击工具栏；
+      // 优先带 aria-label（发送/Send）的专属按钮，旧版 id 保留兜底
       sendButtonCandidates: [
         '#flow-end-msg-send',
-        'button[id*="send"]',
-        'button[class*="send"]',
+        'div[role="button"][aria-label*="发送"]',
         'button[aria-label*="发送"]',
+        'div[role="button"][aria-label*="Send"]',
         'button[aria-label*="Send"]',
+        'button[class*="send"]',
+        'div[class*="send-btn"]',
       ],
       replyCandidates: [
         '[class*="markdown"]',
+        '[class*="message-content"]',
+        '[class*="msg-content"]',
         '[class*="answer"]',
         '[class*="response"]',
         '[class*="message"] div[class*="text"]',

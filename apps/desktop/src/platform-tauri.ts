@@ -25,6 +25,10 @@ import {
   type AskTask,
   type AiConfig,
   mergeConfigs,
+  resolveRecipe,
+  genericSteps,
+  DEFAULT_RECIPES,
+  type Recipe,
 } from '@askall/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
@@ -32,8 +36,6 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
-/** AI 站点打开方式存储键（与共享 App.tsx 写入侧保持一致）。 */
-const OPEN_MODE_KEY = 'local:openMode';
 /** AI 配置存储键（与共享 utils/aiConfig 保持一致）。 */
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 
@@ -44,24 +46,40 @@ const AI_CONFIGS_KEY = 'local:aiConfigs';
 let cachedVersion = '0.0.0';
 
 /**
- * 同步读取当前「打开方式」。
- * 共享 App.tsx 通过 platform.storage.setItem 写入（值为 JSON 字符串 'embedded'/'browser'），
- * 桌面端 storage 实现落地到 localStorage，故直接同步读取即可，便于 ask 编排时即时决策。
+ * 打开方式设置已移除：桌面端固定「应用内嵌」展示 chat（attach 到主窗口田字格），
+ * 不再用系统浏览器打开。保留 OpenMode 返回类型以兼容调用方。
  */
 function readOpenMode(): OpenMode {
-  try {
-    const raw = localStorage.getItem(OPEN_MODE_KEY);
-    if (!raw) return 'embedded';
-    const v = JSON.parse(raw);
-    return v === 'browser' ? 'browser' : 'embedded';
-  } catch {
-    return 'embedded';
+  return 'embedded';
+}
+
+/**
+ * 为某个 AI 构建自动化 Recipe（与扩展端 background 的 resolveRecipe 同一份数据）。
+ * - 默认平台：用内置 Recipe（含站点专属选择器，改版时随 @askall/shared 更新）；
+ * - 自定义平台：通用策略链；若用户在设置里配过选择器，注入到通用链里。
+ * 仅随 ask 请求传给 Rust，不写回 localStorage，避免持久化过期的 Recipe。
+ */
+function recipeForConfig(ai: AiConfig): Recipe {
+  if (DEFAULT_RECIPES.some((r) => r.id === ai.id)) {
+    return resolveRecipe(ai.id, ai.name, ai.url);
   }
+  const sel = ai.selectors;
+  return {
+    id: ai.id,
+    name: ai.name,
+    version: 0,
+    url: ai.url,
+    steps: genericSteps(
+      sel?.inputCandidates ?? (sel?.input ? [sel.input] : []),
+      sel?.sendButtonCandidates ?? (sel?.sendButton ? [sel.sendButton] : []),
+      sel?.replyCandidates ?? [],
+    ),
+  };
 }
 
 /**
  * 从 localStorage 读取并合并 AI 配置，按 aiIds 过滤出本次要发送的配置子集。
- * Rust 编排器需要完整配置（URL + 选择器），不能仅凭 id 工作。
+ * Rust 编排器需要完整配置（URL + Recipe），不能仅凭 id 工作。
  */
 async function resolveConfigs(aiIds?: string[]): Promise<AiConfig[]> {
   let stored: AiConfig[] | null = null;
@@ -72,8 +90,11 @@ async function resolveConfigs(aiIds?: string[]): Promise<AiConfig[]> {
     stored = null;
   }
   const merged = mergeConfigs(stored ?? null);
-  if (!aiIds || aiIds.length === 0) return merged.filter((c) => c.enabled);
-  return merged.filter((c) => aiIds.includes(c.id));
+  const list =
+    !aiIds || aiIds.length === 0
+      ? merged.filter((c) => c.enabled)
+      : merged.filter((c) => aiIds.includes(c.id));
+  return list.map((c) => ({ ...c, recipe: recipeForConfig(c) }));
 }
 
 export const tauriPlatform: PlatformApi = {
@@ -167,6 +188,14 @@ export const tauriPlatform: PlatformApi = {
     // 田字格布局：把各 AI 聊天页 attach 到主窗口并定位（cells 坐标/尺寸为逻辑像素）
     layoutAiGrid: async (cells) => {
       await invoke('layout_ai_grid', { cells });
+    },
+    // 外链打开：在系统默认浏览器中打开该会话（GridChat 单元格「外链」按钮）
+    openExternal: async (url) => {
+      try {
+        await openUrl(url);
+      } catch (e) {
+        console.warn('[askall-tauri] 外链打开失败:', e);
+      }
     },
     onReply: (handler) => {
       // listen 异步返回 unlisten；在等待期间若已取消，则立即释放，避免悬挂订阅。

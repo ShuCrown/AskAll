@@ -66,7 +66,9 @@ export const extensionPlatform: PlatformApi = {
     },
     openSettings: async () => {
       try {
-        await browser.runtime.openOptionsPage();
+        // content script 上下文不可靠直接调 openOptionsPage，统一经 background 打开
+        // （background.ts 已处理 OPEN_SETTINGS → openSettingsPage）
+        await browser.runtime.sendMessage({ type: 'OPEN_SETTINGS' });
       } catch (e) {
         console.warn('[askall-ext] 打开设置页失败:', e);
       }
@@ -88,6 +90,11 @@ export const extensionPlatform: PlatformApi = {
       return { task: (res?.task ?? null) as AskTask | null };
     },
     openAiTab: (url) =>
+      browser.runtime
+        .sendMessage({ type: 'OPEN_AI_TAB', url })
+        .then(() => undefined),
+    // 外链打开：扩展端即新开/切换到浏览器标签页（与 openAiTab 一致）
+    openExternal: (url) =>
       browser.runtime
         .sendMessage({ type: 'OPEN_AI_TAB', url })
         .then(() => undefined),

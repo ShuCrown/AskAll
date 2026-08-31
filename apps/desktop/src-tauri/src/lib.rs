@@ -15,7 +15,8 @@
 //!   - mode = "browser"  → opener 在系统浏览器打开（无法自动发送，回传提示）
 //!   - mode = "embedded" → 把 AI 聊天页以 Webview attach 到主窗口（不弹独立窗口），
 //!     由主窗口前端按「田字格」布局（layout_ai_grid），点击可放大单个 chat 铺满整窗、
-//!     可还原回网格；注入 auto_send::build_payload 产出的 JS（自动填充+发送+回复轮询），
+//!     可还原回网格；注入 auto_send::build_payload 产出的 JS（@askall/shared 的
+//!     runAutomation 引擎 + 各 AI 的 Recipe，自动填充+发送+回复观察），
 //!     JS 通过 __TAURI_INTERNALS__.invoke 回调 emit_ai_reply，再由本端
 //!     emit('ai-reply', payload) 推给主窗口，用于状态汇总与历史会话地址回写。
 
@@ -48,6 +49,10 @@ pub struct AiConfig {
     pub selectors: Option<auto_send::AiSelectors>,
     #[serde(default)]
     pub is_default: Option<bool>,
+    /// 自动化 Recipe（JSON，由前端 @askall/shared 的 resolveRecipe / genericSteps 构建，
+    /// 与扩展端同一份数据）。注入引擎时使用；为空时回退到 Rust 内置通用 Recipe。
+    #[serde(default)]
+    pub recipe: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -111,6 +116,9 @@ struct AppState {
     /// `show_ai_chat` 据此做「差异导航」：请求地址与当前一致时只显示不跳转，
     /// 避免重复 reload 打断进行中的流式回复。
     ai_current_urls: Mutex<HashMap<String, String>>,
+    /// 已回传 AI_REPLY_DONE 的 (taskId, aiId)。
+    /// 保活心跳据此判断该聊天页已结束、可停止周期性 eval（见 run_one_ai）。
+    done_replies: Mutex<HashSet<(String, String)>>,
 }
 
 // ---------- 工具函数 ----------
@@ -131,6 +139,24 @@ fn gen_id() -> String {
         .unwrap_or(0);
     let c = COUNTER.fetch_add(1, Ordering::SeqCst);
     format!("{:x}-{:x}", ms, c)
+}
+
+/// Chrome 兼容 UA：部分 AI 站点（如豆包）按 UA 识别到 WKWebView/WebView 的
+/// Safari 类 UA 后不渲染聊天界面（白屏）；其它站点不受影响。统一用 Chrome UA，
+/// 与扩展端（真实 Chrome 浏览器）行为保持一致。按平台给出对应 OS 的 UA。
+fn chrome_user_agent() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    }
 }
 
 /// 创建或复用独立 AI 窗口（兜底路径：attach 到主窗口的聊天页不存在时，
@@ -158,6 +184,7 @@ fn get_or_create_ai_window(
         .parse::<url::Url>()
         .map_err(|e: url::ParseError| format!("invalid url: {e}"))?;
     let win = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+        .user_agent(chrome_user_agent())
         .title(title)
         .inner_size(520.0, 720.0)
         .min_inner_size(360.0, 480.0)
@@ -188,7 +215,10 @@ fn ensure_embedded_webview(
         .url
         .parse::<url::Url>()
         .map_err(|e: url::ParseError| format!("invalid url: {e}"))?;
-    // attach 到主窗口：Window::add_child(WebviewBuilder::new(label, url), pos, size)
+    // attach 到主窗口：Window::add_child(WebviewBuilder::new(label, url), pos, size)。
+    // 注意：不给内嵌子 webview 设置 user_agent —— 实测 add_child 的子 webview 设置
+    // 自定义 UA 后不再渲染（单元格只剩 DOM 占位「聊天页加载中…」）。
+    // 豆包等站点 UA 兼容问题另想办法，不再在此处注入 UA。
     let window = main.as_ref().window();
     let wv_builder = WebviewBuilder::new(label, WebviewUrl::External(parsed));
     let wv = window
@@ -280,14 +310,54 @@ async fn run_one_ai(
         },
     );
 
-    let selectors = cfg.selectors.clone().unwrap_or_default();
-    let js = auto_send::build_payload(&text, &cfg.id, &cfg.name, &task_id, &selectors);
+    // 用前端构建的 Recipe（@askall/shared 同一份数据）注入 runAutomation 引擎；
+    // 缺 recipe 时回退到 Rust 内置通用 Recipe，保证任何配置都能跑通用策略链。
+    let recipe = cfg
+        .recipe
+        .clone()
+        .unwrap_or_else(|| auto_send::generic_recipe(&cfg.id, &cfg.name, &cfg.url));
+    let js = auto_send::build_payload(&text, &cfg.id, &cfg.name, &task_id, &recipe);
 
     // 新会话：等页面加载稳定再注入；追问：页面已就绪，稍等即可。
     let delay = if follow_up { 1 } else { 2 };
     tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
     if let Err(e) = webview.eval(&js) {
         log::warn!("[askall] 注入脚本到 {} 失败: {}", cfg.id, e);
+    }
+
+    // 保活心跳：macOS WKWebView 对失焦/后台的内嵌 webview 会节流 JS 定时器与
+    // React 调度，表现为引擎的发送检测与观察停滞——面板一直停在「正在发送」，
+    // 切回聊天页（webview 重新获得焦点）才回传回复。由 Rust 侧周期性 eval
+    // 探活脚本强制唤起 webview 的 JS 事件循环，并触发引擎注册的
+    // window.__askallObservePing() 立即补跑各观察策略的 check()。
+    // 收到该任务 AI_REPLY_DONE 或超过观察上限后自动停止。
+    {
+        let app = app.clone();
+        let wv = webview.clone();
+        let ai_id = cfg.id.clone();
+        let task_id = task_id.clone();
+        tokio::spawn(async move {
+            const PING_JS: &str =
+                "try{window.__askallObservePing&&window.__askallObservePing()}catch(e){}";
+            let max = std::time::Duration::from_secs(150);
+            let started = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                if started.elapsed() > max {
+                    break;
+                }
+                if app
+                    .state::<AppState>()
+                    .done_replies
+                    .lock()
+                    .await
+                    .contains(&(task_id.clone(), ai_id.clone()))
+                {
+                    break;
+                }
+                let _ = wv.eval(PING_JS);
+            }
+        });
     }
 }
 
@@ -303,6 +373,9 @@ async fn dispatch_ask(
     if configs.is_empty() {
         return Err("未选择任何 AI".into());
     }
+
+    // 新任务开始时清空上一轮的「已完成」记录：保活心跳只关心当前任务
+    state.done_replies.lock().await.clear();
 
     // 会话归属：追问复用当前任务的 conversationId（延续同一话题）；
     // 新提问总是开启新会话（否则「新话题」会被追加进上一个话题）。
@@ -388,6 +461,7 @@ async fn open_ai_webview(app: tauri::AppHandle, url: String) -> Result<(), Strin
         .parse::<url::Url>()
         .map_err(|e: url::ParseError| e.to_string())?;
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+        .user_agent(chrome_user_agent())
         .title("AskAll AI")
         .inner_size(520.0, 720.0)
         .min_inner_size(360.0, 480.0)
@@ -477,6 +551,14 @@ async fn emit_ai_reply(
             }
         }
     }
+    // 标记该 AI 已完成，保活心跳据此停止周期性 eval
+    if r#type == "AI_REPLY_DONE" {
+        state
+            .done_replies
+            .lock()
+            .await
+            .insert((task_id.clone(), ai_id.clone()));
+    }
     let payload = ReplyPayload {
         kind: r#type,
         ai_id,
@@ -525,6 +607,7 @@ pub fn run() {
         .manage(AppState {
             current_task: Mutex::new(None),
             ai_current_urls: Mutex::new(HashMap::new()),
+            done_replies: Mutex::new(HashSet::new()),
         })
         .setup(|app| {
             // 注册系统级「划词提问」全局快捷键（失败不阻断启动，仅告警）。

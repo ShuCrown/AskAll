@@ -1,5 +1,6 @@
 export { default as AiConfigPanel } from './AiConfigPanel';
-export { default as FloatingPanel } from './FloatingPanel';
+// 网页内浮层版工作台（扩展端右击/划词入口，与 popup/桌面共用同一 Workspace）
+export { default as PageWorkspace } from './PageWorkspace';
 
 // v1.1 工作台组件（左历史 + 右时间线；设置独立载体）
 export { default as Workspace } from './workspace/Workspace';
