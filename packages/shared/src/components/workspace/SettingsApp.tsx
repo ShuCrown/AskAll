@@ -8,8 +8,7 @@
  */
 import { useEffect, useState } from 'react';
 import AiConfigPanel from '../AiConfigPanel';
-import { getPlatform } from '../../lib/platform';
-import { isMacTauri } from './SessionSidebar';
+import { getPlatform, isMacTauri } from '../../lib/platform';
 
 export default function SettingsApp() {
   const [version, setVersion] = useState('');

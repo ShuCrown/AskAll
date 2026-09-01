@@ -1,27 +1,25 @@
 /**
- * Workspace —— v1.1 工作台根组件（历史与提问合并页，千问办公式布局）。
+ * Workspace —— 工作台根组件（历史与提问合并页）。
  *
- * 无整页顶栏：
- *   - 侧栏展开时：侧栏顶部行 = 收起 + 搜索按钮；右侧纯内容区。
- *   - 侧栏收起时：右侧顶部行 = 展开 + 搜索按钮（+ 当前会话标题）。
- *   - 搜索统一走弹窗（SearchDialog），匹配历史会话。
+ * 无左侧历史栏、无整页顶栏：
+ *   - 顶部常驻悬浮行 = 搜索 + 新话题 + 当前会话标题 + 设置。
+ *     （hideTopActions 时隐藏 搜索/新话题/设置，仅保留标题；插件浮层改由
+ *       PageWorkspace 标题栏承载这些动作）
+ *   - 搜索统一走弹窗（SearchDialog）：空态顶部「置顶」分组 + 最近会话，
+ *     输入后按问题标题或会话内容过滤。历史会话不再常驻展示，仅通过搜索找回。
  * 会话内容（卡片内）：
  *   - 桌面端：GridChat 田字格——各 AI 真实聊天页并排展示（提问不弹窗），
  *     点击顶部 AI 按钮放大单个 chat 铺满整窗，可还原回田字格；
  *   - 扩展端：ChatView 时间线（问题 + 回答卡片）。
- * 两种密度：
- *   - full    ：静态双栏（桌面主窗口 / 宽容器），侧栏可收起；
- *   - compact ：侧栏默认收起，展开时为覆盖式抽屉（扩展 popup 等窄容器）。
- * 未显式指定密度时按容器宽度自动判定（≥860px → full）。
  *
  * macOS 桌面端为 overlay 标题栏：顶部行左侧为红绿灯留空并作为窗口拖拽区。
  *
  * 生命周期职责：挂载即 hydrate（popup 重开可恢复进行中任务）、
  * 订阅 onReply 流入 store、窗口聚焦时刷新配置与历史（设置窗口改动同步）。
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { PanelLeftOpen, Search, SquarePen } from 'lucide-react';
-import { getPlatform } from '../../lib/platform';
+import { useEffect, useMemo, useState } from 'react';
+import { Search, Settings, SquarePen } from 'lucide-react';
+import { getPlatform, isMacTauri } from '../../lib/platform';
 import { selectConversations, useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
 import GridChat from './GridChat';
@@ -29,17 +27,13 @@ import ChatView from './ChatView';
 import Composer from './Composer';
 import EmptyState from './EmptyState';
 import SearchDialog from './SearchDialog';
-import SessionSidebar, { isMacTauri } from './SessionSidebar';
 
-export type WorkspaceDensity = 'full' | 'compact';
+interface WorkspaceProps {
+  /** 不渲染顶部行（插件浮层）：搜索/新话题/设置由 PageWorkspace 标题栏承载，会话标题不显示 */
+  hideTopActions?: boolean;
+}
 
-const FULL_MIN_WIDTH = 860;
-
-export default function Workspace({
-  density,
-}: {
-  density?: WorkspaceDensity;
-}) {
+export default function Workspace({ hideTopActions = false }: WorkspaceProps) {
   const hydrated = useAskStore((s) => s.hydrated);
   const activeConvId = useAskStore((s) => s.activeConvId);
   const history = useAskStore((s) => s.history);
@@ -49,12 +43,6 @@ export default function Workspace({
   const refreshHistory = useAskStore((s) => s.refreshHistory);
   const newConversation = useAskStore((s) => s.newConversation);
 
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [autoDensity, setAutoDensity] = useState<WorkspaceDensity>(
-    density ?? 'full',
-  );
-  // 侧栏展开态：full 默认展开，compact 默认收起
-  const [sidebarOpen, setSidebarOpen] = useState((density ?? 'full') === 'full');
   const [searchOpen, setSearchOpen] = useState(false);
   const macTauri = useMemo(() => isMacTauri(), []);
 
@@ -78,30 +66,6 @@ export default function Workspace({
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, [refreshConfigs, refreshHistory]);
-
-  // 未显式指定密度时按容器宽度自动判定；密度变化时重置侧栏默认态
-  const lastDensityRef = useRef<WorkspaceDensity | null>(null);
-  useEffect(() => {
-    const apply = (d: WorkspaceDensity) => {
-      if (lastDensityRef.current !== d) {
-        lastDensityRef.current = d;
-        setAutoDensity(d);
-        setSidebarOpen(d === 'full');
-      }
-    };
-    if (density) {
-      apply(density);
-      return;
-    }
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () =>
-      apply(el.clientWidth >= FULL_MIN_WIDTH ? 'full' : 'compact');
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [density, hydrated]);
 
   // 快捷键：⌘/Ctrl+K 新话题
   useEffect(() => {
@@ -129,11 +93,6 @@ export default function Workspace({
     return () => window.removeEventListener('askall-external-ask', onExternalAsk);
   }, [newConversation]);
 
-  // 收起态下 compact 模式打开会话后自动收起抽屉
-  useEffect(() => {
-    if (activeConvId && autoDensity === 'compact') setSidebarOpen(false);
-  }, [activeConvId, autoDensity]);
-
   const activeTitle = useMemo(() => {
     if (!activeConvId) return '新话题';
     const conv = selectConversations(history).find(
@@ -144,16 +103,12 @@ export default function Workspace({
 
   if (!hydrated) {
     return (
-      <div
-        ref={containerRef}
-        className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground"
-      >
+      <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
         加载中…
       </div>
     );
   }
 
-  const isFull = autoDensity === 'full';
   const isTauri = getPlatform().kind === 'tauri';
   const main = activeConvId ? (
     // 桌面端：田字格并排展示各 AI 聊天页（可放大单个/还原）；扩展端：时间线
@@ -167,9 +122,9 @@ export default function Workspace({
   );
 
   /**
-   * 右侧内容：灰底之上四周留白的白色圆角卡片，视觉悬浮（Trae Work 式）。
-   * 收起态下卡片占满整个 main 区（与展开态等高），顶部行悬浮于卡片之上，
-   * 卡片内部预留等高占位（h-14 = py-4×2 + 按钮 24px）避免内容与顶栏重叠。
+   * 内容区：灰底之上四周留白的白色圆角卡片，视觉悬浮（Trae Work 式）。
+   * 顶部行悬浮于卡片之上，卡片内部预留等高占位（h-14 = py-4×2 + 按钮 24px）
+   * 避免内容与顶栏重叠。
    *
    * 桌面端（田字格）把「chat 区」与「底部问答输入框」拆成两块独立卡片，
    * 用 gap 隔开，互不合在一起；扩展端时间线内仍自带 Composer，不在此重复。
@@ -181,7 +136,8 @@ export default function Workspace({
 
   const mainCard = (
     <div className="absolute inset-0 flex flex-col bg-card pl-3 pt-4 pr-4">
-      {!sidebarOpen && <div className="h-14 shrink-0" aria-hidden="true" />}
+      {/* 占位等高于悬浮顶行，避免内容与顶行重叠；插件浮层无顶行则不留占位 */}
+      {!hideTopActions && <div className="h-14 shrink-0" aria-hidden="true" />}
       <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
       {bottomComposer && (
         <div className="shrink-0 pb-4 pt-2">{bottomComposer}</div>
@@ -192,11 +148,16 @@ export default function Workspace({
   const iconBtn =
     'flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground';
 
+  const openSettings = () => {
+    getPlatform().window.openSettings().catch(() => {});
+  };
+
   /**
-   * 收起态顶部行：展开 + 搜索 + 新话题（+ 当前会话标题）。
-   * 上下 16px 留白；下方为悬浮卡片，无需 border-b 分隔。
+   * 顶部常驻悬浮行：搜索 + 新话题 + 标题 + 设置（macOS 左侧为红绿灯留空）。
+   * 插件浮层（hideTopActions）完全不渲染此行：搜索/新话题/设置由 PageWorkspace
+   * 标题栏承载，会话标题（含「新话题」）也不显示，内容区从卡片顶部直接开始。
    */
-  const collapsedTopRow = (
+  const topRow = hideTopActions ? null : (
     <div
       data-tauri-drag-region
       className={cn(
@@ -204,14 +165,6 @@ export default function Workspace({
         macTauri ? 'pl-[74px] pr-2' : 'pl-2 pr-2',
       )}
     >
-      <button
-        type="button"
-        onClick={() => setSidebarOpen(true)}
-        title="展开侧栏"
-        className={iconBtn}
-      >
-        <PanelLeftOpen className="h-4 w-4" />
-      </button>
       <button
         type="button"
         onClick={() => setSearchOpen(true)}
@@ -231,55 +184,23 @@ export default function Workspace({
       <span className="ml-2 truncate text-sm font-medium tracking-tight">
         {activeTitle}
       </span>
+      <button
+        type="button"
+        onClick={openSettings}
+        title="设置"
+        className={cn(iconBtn, 'ml-auto')}
+      >
+        <Settings className="h-4 w-4" />
+      </button>
     </div>
   );
 
-  /** 收起态顶栏：悬浮在白色卡片上方（透明背景） */
-  const floatingTopRow = !sidebarOpen && (
-    <div className="absolute inset-x-0 top-0 z-10">{collapsedTopRow}</div>
-  );
-
   return (
-    <div ref={containerRef} className="relative flex h-full bg-background">
-      {isFull ? (
-        <>
-          {sidebarOpen && (
-            <aside className="w-[240px] shrink-0">
-              <SessionSidebar
-                onCollapse={() => setSidebarOpen(false)}
-                onSearch={() => setSearchOpen(true)}
-              />
-            </aside>
-          )}
-          <main className="relative min-w-0 flex-1">
-            {mainCard}
-            {floatingTopRow}
-          </main>
-        </>
-      ) : (
-        <>
-          <main className="relative h-full min-w-0 flex-1">
-            {mainCard}
-            {floatingTopRow}
-          </main>
-
-          {/* compact：侧栏为覆盖式抽屉 */}
-          {sidebarOpen && (
-            <>
-              <div
-                className="absolute inset-0 z-30 bg-black/20"
-                onClick={() => setSidebarOpen(false)}
-              />
-              <div className="absolute inset-y-0 left-0 z-40 w-[260px] bg-background shadow-lg">
-                <SessionSidebar
-                  onCollapse={() => setSidebarOpen(false)}
-                  onSearch={() => setSearchOpen(true)}
-                />
-              </div>
-            </>
-          )}
-        </>
-      )}
+    <div className="relative flex h-full bg-background">
+      <main className="relative min-w-0 flex-1">
+        {mainCard}
+        <div className="absolute inset-x-0 top-0 z-10">{topRow}</div>
+      </main>
 
       {searchOpen && <SearchDialog onClose={() => setSearchOpen(false)} />}
     </div>

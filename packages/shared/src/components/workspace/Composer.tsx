@@ -19,7 +19,7 @@ import { Button } from '../ui/button';
 import AiIcon from './AiIcon';
 
 export default function Composer({
-  placeholder = '输入问题，同时发送给所选 AI…（⌘/Ctrl+Enter 发送）',
+  placeholder = '输入问题，同时发送给所选 AI…',
   onSubmit,
   value,
   onValueChange,
@@ -98,6 +98,14 @@ export default function Composer({
     [configs, selected],
   );
   const selectedCount = selectedAis.length;
+
+  // 快捷键提示（发送按钮左侧）：macOS 用 ⌘，其余用 Ctrl；Enter 本身即换行
+  const isMac = useMemo(
+    () =>
+      typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform),
+    [],
+  );
+  const shortcutHint = isMac ? '⌘ ↵ 发送 · ↵ 换行' : 'Ctrl+↵ 发送 · ↵ 换行';
 
   return (
     <div className="flex flex-col rounded-lg border bg-card shadow-sm">
@@ -191,9 +199,13 @@ export default function Composer({
           )}
         </div>
 
+        {/* 快捷键提示：紧贴发送按钮左侧，弱化展示 */}
+        <span className="ml-auto select-none text-[11px] leading-none text-muted-foreground">
+          {shortcutHint}
+        </span>
+
         <Button
           size="sm"
-          className="ml-auto"
           onClick={() => submit()}
           disabled={sending || !text.trim() || selectedCount === 0}
         >

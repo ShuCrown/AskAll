@@ -21,9 +21,58 @@ function timeLabel(ts: number): string {
     : `${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
+/** 单个结果行：标题 + 命中的轮次副标题 + 时间/轮数 + ⌘数字快捷打开 */
+function SearchRow({
+  r,
+  idx,
+  selected,
+  onPick,
+  onHover,
+}: {
+  r: { conv: Conversation; matchedTurn?: string };
+  idx: number;
+  selected: boolean;
+  onPick: () => void;
+  onHover: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onMouseEnter={onHover}
+      onClick={onPick}
+      className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left ${
+        selected ? 'bg-accent' : ''
+      }`}
+    >
+      <span className="h-2 w-2 shrink-0 rounded-full border border-muted-foreground/50" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm text-foreground/90">
+          {r.conv.root.question}
+        </span>
+        {r.matchedTurn && r.matchedTurn !== r.conv.root.question && (
+          <span className="block truncate text-[11px] text-muted-foreground">
+            {r.matchedTurn}
+          </span>
+        )}
+      </span>
+      <span className="shrink-0 text-[10px] text-muted-foreground">
+        {timeLabel(r.conv.root.timestamp)}
+        {r.conv.turns.length > 1 && ` · ${r.conv.turns.length} 轮`}
+      </span>
+      {idx < 9 && (
+        <span className="flex shrink-0 items-center gap-0.5 text-[10px] text-muted-foreground">
+          <kbd className="rounded border bg-muted px-1">⌘</kbd>
+          <kbd className="rounded border bg-muted px-1">{idx + 1}</kbd>
+        </span>
+      )}
+    </button>
+  );
+}
+
 export default function SearchDialog({ onClose }: { onClose: () => void }) {
   const history = useAskStore((s) => s.history);
   const openConversation = useAskStore((s) => s.openConversation);
+  const pinned = useAskStore((s) => s.pinned);
 
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -35,25 +84,50 @@ export default function SearchDialog({ onClose }: { onClose: () => void }) {
 
   const conversations = useMemo(() => selectConversations(history), [history]);
 
-  /** 命中信息：命中的轮次问题（非首轮时作为副标题展示） */
-  const results = useMemo(() => {
+  /** 置顶会话：空查询时展示于结果顶部（保留手动置顶的快捷入口） */
+  const pinnedConvs = useMemo(() => {
+    const byKey = new Map(conversations.map((c) => [c.key, c]));
+    return pinned
+      .map((k) => byKey.get(k))
+      .filter((c): c is Conversation => !!c);
+  }, [conversations, pinned]);
+
+  /**
+   * 展示列表：空查询 = 置顶分组 + 最近会话（置顶去重后在前）；
+   * 有输入 = 命中问题标题或会话内容的会话（命中的轮次问题作为副标题）。
+   */
+  const displayList = useMemo(() => {
     const q = query.trim().toLowerCase();
     const out: { conv: Conversation; matchedTurn?: string }[] = [];
-    for (const conv of conversations) {
-      if (!q) {
+    if (!q) {
+      const pinnedKeys = new Set(pinnedConvs.map((c) => c.key));
+      for (const conv of pinnedConvs) {
         out.push({ conv });
-      } else {
-        const hit = conv.turns.find(
-          (t) =>
-            t.question.toLowerCase().includes(q) ||
-            t.answers?.some((a) => a.text.toLowerCase().includes(q)),
-        );
-        if (hit) out.push({ conv, matchedTurn: hit.question });
+        if (out.length >= MAX_RESULTS) return out;
       }
+      for (const conv of conversations) {
+        if (pinnedKeys.has(conv.key)) continue;
+        out.push({ conv });
+        if (out.length >= MAX_RESULTS) return out;
+      }
+      return out;
+    }
+    for (const conv of conversations) {
+      const hit = conv.turns.find(
+        (t) =>
+          t.question.toLowerCase().includes(q) ||
+          t.answers?.some((a) => a.text.toLowerCase().includes(q)),
+      );
+      if (hit) out.push({ conv, matchedTurn: hit.question });
       if (out.length >= MAX_RESULTS) break;
     }
     return out;
-  }, [conversations, query]);
+  }, [conversations, query, pinnedConvs]);
+
+  /** 空查询时置顶分组占用的行数（供分组标题切分渲染） */
+  const pinnedCount = !query.trim()
+    ? Math.min(pinnedConvs.length, MAX_RESULTS)
+    : 0;
 
   useEffect(() => {
     setSelectedIdx(0);
@@ -72,7 +146,7 @@ export default function SearchDialog({ onClose }: { onClose: () => void }) {
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setSelectedIdx((i) => Math.min(i + 1, results.length - 1));
+      setSelectedIdx((i) => Math.min(i + 1, displayList.length - 1));
       return;
     }
     if (e.key === 'ArrowUp') {
@@ -82,13 +156,13 @@ export default function SearchDialog({ onClose }: { onClose: () => void }) {
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      const r = results[selectedIdx];
+      const r = displayList[selectedIdx];
       if (r) pick(r.conv.key);
       return;
     }
     // ⌘/Ctrl + 1-9 快捷打开
     if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
-      const r = results[Number(e.key) - 1];
+      const r = displayList[Number(e.key) - 1];
       if (r) {
         e.preventDefault();
         pick(r.conv.key);
@@ -121,48 +195,50 @@ export default function SearchDialog({ onClose }: { onClose: () => void }) {
 
         {/* 结果列表 */}
         <div className="flex items-center justify-between px-4 pt-2 text-xs text-muted-foreground">
-          <span>共 {results.length} 个会话</span>
+          <span>共 {displayList.length} 个会话</span>
           <span className="text-muted-foreground/70">⌘+数字 快捷打开</span>
         </div>
         <div className="max-h-[50vh] overflow-y-auto p-2">
-          {results.length === 0 ? (
+          {displayList.length === 0 ? (
             <p className="py-8 text-center text-xs text-muted-foreground">
               没有匹配的会话
             </p>
           ) : (
-            results.map((r, i) => (
-              <button
-                key={r.conv.key}
-                type="button"
-                onMouseEnter={() => setSelectedIdx(i)}
-                onClick={() => pick(r.conv.key)}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left ${
-                  i === selectedIdx ? 'bg-accent' : ''
-                }`}
-              >
-                <span className="h-2 w-2 shrink-0 rounded-full border border-muted-foreground/50" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm text-foreground/90">
-                    {r.conv.root.question}
-                  </span>
-                  {r.matchedTurn && r.matchedTurn !== r.conv.root.question && (
-                    <span className="block truncate text-[11px] text-muted-foreground">
-                      {r.matchedTurn}
-                    </span>
-                  )}
-                </span>
-                <span className="shrink-0 text-[10px] text-muted-foreground">
-                  {timeLabel(r.conv.root.timestamp)}
-                  {r.conv.turns.length > 1 && ` · ${r.conv.turns.length} 轮`}
-                </span>
-                {i < 9 && (
-                  <span className="flex shrink-0 items-center gap-0.5 text-[10px] text-muted-foreground">
-                    <kbd className="rounded border bg-muted px-1">⌘</kbd>
-                    <kbd className="rounded border bg-muted px-1">{i + 1}</kbd>
-                  </span>
-                )}
-              </button>
-            ))
+            <>
+              {pinnedCount > 0 && (
+                <p className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                  置顶
+                </p>
+              )}
+              {displayList.slice(0, pinnedCount).map((r, i) => (
+                <SearchRow
+                  key={r.conv.key}
+                  r={r}
+                  idx={i}
+                  selected={i === selectedIdx}
+                  onPick={() => pick(r.conv.key)}
+                  onHover={() => setSelectedIdx(i)}
+                />
+              ))}
+              {pinnedCount > 0 && displayList.length > pinnedCount && (
+                <p className="px-2.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                  最近
+                </p>
+              )}
+              {displayList.slice(pinnedCount).map((r, i) => {
+                const idx = pinnedCount + i;
+                return (
+                  <SearchRow
+                    key={r.conv.key}
+                    r={r}
+                    idx={idx}
+                    selected={idx === selectedIdx}
+                    onPick={() => pick(r.conv.key)}
+                    onHover={() => setSelectedIdx(idx)}
+                  />
+                );
+              })}
+            </>
           )}
         </div>
       </div>

@@ -12,10 +12,11 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
-import { Minus, Settings, X } from 'lucide-react';
+import { Minus, Search, Settings, SquarePen, X } from 'lucide-react';
 import { getPlatform } from '../lib/platform';
 import { useAskStore } from '../store/askStore';
 import Workspace from './workspace/Workspace';
+import SearchDialog from './workspace/SearchDialog';
 
 /** 面板默认宽度：工作台需足够宽（与桌面端多聊并排一致） */
 const PANEL_WIDTH = 880;
@@ -36,6 +37,8 @@ export default function PageWorkspace({
   const [logoFailed, setLogoFailed] = useState(false);
   // 固定态恒为 true：面板默认钉在页面上，点击面板外部不自动关闭（pin 按钮已移除）
   const [minimized, setMinimized] = useState(false);
+  // 搜索历史弹窗（由标题栏「搜索」按钮触发，同 Workspace 顶部搜索）
+  const [searchOpen, setSearchOpen] = useState(false);
 
   // 将「收起」状态同步给 content script（固定恒为 true，点击面板外部不自动关闭）
   useEffect(() => {
@@ -203,6 +206,32 @@ export default function PageWorkspace({
                 style={styles.iconBtn}
                 onClick={(e) => {
                   e.stopPropagation();
+                  setSearchOpen(true);
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+                aria-label="搜索历史"
+                title="搜索历史"
+              >
+                <Search style={{ width: 15, height: 15 }} />
+              </button>
+              <button
+                type="button"
+                style={styles.iconBtn}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  useAskStore.getState().newConversation();
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+                aria-label="新话题"
+                title="新话题"
+              >
+                <SquarePen style={{ width: 15, height: 15 }} />
+              </button>
+              <button
+                type="button"
+                style={styles.iconBtn}
+                onClick={(e) => {
+                  e.stopPropagation();
                   openSettings();
                 }}
                 onMouseDown={(e) => e.stopPropagation()}
@@ -232,10 +261,15 @@ export default function PageWorkspace({
             </div>
           </div>
 
-          {/* 主体：共享工作台（历史侧栏 + 时间线 + Composer） */}
+          {/* 主体：共享工作台（搜索/新话题/设置已上移到标题栏，此处仅保留时间线 + Composer） */}
           <div style={styles.body}>
-            <Workspace density="compact" />
+            <Workspace hideTopActions />
           </div>
+
+          {/* 搜索历史弹窗：与标题栏「搜索」按钮联动（置于卡片内，与 Workspace 内渲染同堆叠上下文） */}
+          {searchOpen && (
+            <SearchDialog onClose={() => setSearchOpen(false)} />
+          )}
         </div>
       )}
     </div>
