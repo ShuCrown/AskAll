@@ -15,6 +15,7 @@ export function genericSteps(
   inputSelectors: string[] = [],
   sendSelectors: string[] = [],
   replySelectors: string[] = [],
+  attachSelectors: string[] = [],
 ): StepDef[] {
   return [
     {
@@ -36,6 +37,20 @@ export function genericSteps(
         { kind: 'fill:paste' },
         { kind: 'fill:insert-text' },
         { kind: 'fill:value-setter' },
+      ],
+    },
+    {
+      id: 'attach',
+      // 覆盖最坏情况：三个策略各轮询 8s 反馈 + file-input 多候选尝试
+      timeoutMs: 40_000,
+      strategies: [
+        // 配置了上传入口选择器的站点，优先走最确定性的 file-input 通道
+        ...(attachSelectors.length
+          ? [{ kind: 'attach:file-input', params: { attachSelectors } }]
+          : []),
+        { kind: 'attach:paste' },
+        { kind: 'attach:file-input' },
+        { kind: 'attach:drop' },
       ],
     },
     {
@@ -199,11 +214,38 @@ export function buildGenericRecipe(
   return { id: aiId, name, version: 0, url, steps: genericSteps() };
 }
 
+/**
+ * 把站点配置的上传入口选择器（attachSelectors）注入 attach 步骤：
+ * 以 selector 驱动的 attach:file-input 提到链首（最确定性通道），其余保持通用链。
+ * 内置 Recipe 的步骤是静态预构建的，无法在构建期拿到用户配置，故在此统一注入。
+ */
+function withAttachSelectors(
+  steps: StepDef[],
+  attachSelectors: string[],
+): StepDef[] {
+  if (!attachSelectors.length) return steps;
+  return steps.map((s) => {
+    if (s.id !== 'attach') return s;
+    return {
+      ...s,
+      strategies: [
+        { kind: 'attach:file-input', params: { attachSelectors } },
+        ...s.strategies.filter(
+          (x) => !(x.kind === 'attach:file-input' && x.params?.attachSelectors),
+        ),
+      ],
+    };
+  });
+}
+
 /** 取站点 Recipe：有内置用内置，否则生成通用版 */
 export function resolveRecipe(
   aiId: string,
   name: string,
   url: string,
+  attachSelectors: string[] = [],
 ): Recipe {
-  return getRecipe(aiId) ?? buildGenericRecipe(aiId, name, url);
+  const recipe = getRecipe(aiId) ?? buildGenericRecipe(aiId, name, url);
+  const steps = withAttachSelectors(recipe.steps, attachSelectors);
+  return { ...recipe, steps };
 }

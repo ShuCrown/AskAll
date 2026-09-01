@@ -1,4 +1,5 @@
 import { getPlatform } from '../lib/platform';
+import type { AttachmentInfo } from './task';
 
 /**
  * AI 回答快照：AI_REPLY_DONE 到达后落盘，用于历史会话回放。
@@ -36,6 +37,8 @@ export interface HistoryItem {
   conversationId?: string;
   /** 各 AI 的最终回答快照（v1.1 新增；旧数据可能缺失） */
   answers?: AiAnswerSnapshot[];
+  /** 本次提问携带的附件元数据（仅名称/类型/大小，不含文件本体） */
+  attachments?: AttachmentInfo[];
 }
 
 const HISTORY_KEY = 'local:history';
@@ -69,6 +72,7 @@ export async function addHistory(
   aiNames: string[],
   aiUrls: { name: string; url: string }[] = [],
   conversationId?: string,
+  attachments?: AttachmentInfo[],
 ): Promise<HistoryItem> {
   const history = await getHistory();
   const newItem: HistoryItem = {
@@ -78,6 +82,7 @@ export async function addHistory(
     aiNames,
     aiUrls,
     conversationId,
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
   };
   history.unshift(newItem);
   if (history.length > MAX_ITEMS) history.length = MAX_ITEMS;

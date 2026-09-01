@@ -76,14 +76,24 @@ export const extensionPlatform: PlatformApi = {
   },
 
   ask: {
-    // 转发到 background 的 onMessage 处理器
-    ask: (text, aiIds) =>
+    // 转发到 background 的 onMessage 处理器（附件非空才携带，减少消息体积）
+    ask: (text, aiIds, attachments) =>
       browser.runtime
-        .sendMessage({ type: 'ASK_AI', text, aiIds })
+        .sendMessage({
+          type: 'ASK_AI',
+          text,
+          aiIds,
+          ...(attachments?.length ? { attachments } : {}),
+        })
         .then(() => undefined),
-    followUp: (text, aiIds) =>
+    followUp: (text, aiIds, attachments) =>
       browser.runtime
-        .sendMessage({ type: 'ASK_AI_FOLLOWUP', text, aiIds })
+        .sendMessage({
+          type: 'ASK_AI_FOLLOWUP',
+          text,
+          aiIds,
+          ...(attachments?.length ? { attachments } : {}),
+        })
         .then(() => undefined),
     getTask: async () => {
       const res = await browser.runtime.sendMessage({ type: 'GET_TASK' });

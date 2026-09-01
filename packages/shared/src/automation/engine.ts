@@ -1,4 +1,11 @@
-import type { DomSnapshot, Recipe, RunMeta, StepId, StrategyParams } from './types';
+import type {
+  AttachmentPayload,
+  DomSnapshot,
+  Recipe,
+  RunMeta,
+  StepId,
+  StrategyParams,
+} from './types';
 
 /**
  * 页面侧自动化引擎。
@@ -17,7 +24,10 @@ export async function runAutomation(
   text: string,
   recipe: Recipe,
   meta: RunMeta,
+  attachments: AttachmentPayload[] = [],
 ): Promise<void> {
+  // 附件载荷：dataUrl → File 惰性解码；无附件时所有 attach 步骤直接跳过
+  const files: AttachmentPayload[] = Array.isArray(attachments) ? attachments : [];
   // ---------- 基础工具 ----------
   // 后台标签页下浏览器会把 setTimeout/setInterval 节流到 1Hz 甚至 1/min、
   // 并完全暂停 requestAnimationFrame，导致两处停滞：
@@ -592,6 +602,174 @@ export async function runAutomation(
       (await fillInsertText()) ||
       (await fillPaste())
     );
+  };
+
+  // ---------- 附加文件策略 ----------
+  // 仅当本次提问携带附件时执行。成功判定是启发式的：派发事件后轮询输入区
+  // 邻域的「附件反馈信号」（预览图/文件 chip/文件名文本），出现增量才算成功；
+  // 无反馈的站点判失败走中止+手动路径（宁可保守，不能把没附上文件的提问发出去）。
+
+  /** 附件反馈信号选择器：预览图 / 文件 chip / 上传指示（大小写不敏感的类名匹配） */
+  const ATTACH_INDICATOR_SEL = [
+    'img',
+    '[class*="preview" i]',
+    '[class*="file" i]',
+    '[class*="attach" i]',
+    '[class*="upload" i]',
+    '[class*="thumb" i]',
+    '[class*="chip" i]',
+  ].join(',');
+
+  /** dataUrl → File 惰性解码（整批共用，只解一次） */
+  let fileObjs: File[] | null = null;
+  const getFiles = (): File[] => {
+    if (fileObjs) return fileObjs;
+    fileObjs = [];
+    for (const a of files) {
+      try {
+        const comma = a.dataUrl.indexOf(',');
+        const b64 = comma >= 0 ? a.dataUrl.slice(comma + 1) : a.dataUrl;
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        fileObjs.push(new File([bytes], a.name, { type: a.mime }));
+      } catch {
+        /* 单个坏载荷跳过，不影响其余 */
+      }
+    }
+    return fileObjs;
+  };
+
+  const buildDt = (): DataTransfer | null => {
+    try {
+      const fs = getFiles();
+      if (!fs.length) return null;
+      const dt = new DataTransfer();
+      for (const f of fs) dt.items.add(f);
+      return dt;
+    } catch {
+      return null;
+    }
+  };
+
+  /** 输入框邻域容器：从输入框向上爬至多 4 层，取第一个「足够大」的容器，兜底 body */
+  const attachZone = (): HTMLElement => {
+    let node: HTMLElement | null = ctx.input
+      ? ctx.input.parentElement
+      : document.body;
+    for (let i = 0; i < 4 && node && node !== document.body; i++) {
+      const r = node.getBoundingClientRect();
+      if (r.height >= 160 && r.width >= 240) break;
+      node = node.parentElement;
+    }
+    return node ?? document.body;
+  };
+
+  /** 附件反馈信号签名：可见预览节点数 + 容器文本中出现的文件名个数 */
+  const attachIndicatorSig = (): string => {
+    const zone = attachZone();
+    let count = 0;
+    zone.querySelectorAll(ATTACH_INDICATOR_SEL).forEach((n) => {
+      if (visible(n)) count++;
+    });
+    const lower = (zone.textContent || '').toLowerCase();
+    let nameHits = 0;
+    for (const f of files) {
+      if (f.name && lower.includes(f.name.toLowerCase())) nameHits++;
+    }
+    return `${count}|${nameHits}`;
+  };
+
+  /** 派发后轮询反馈信号，相对基线出现变化即成功 */
+  const waitForAttachFeedback = (
+    before: string,
+    waitMs: number,
+  ): Promise<boolean> =>
+    new Promise((resolve) => {
+      const deadline = Date.now() + waitMs;
+      const timer = interval(() => {
+        if (Date.now() > deadline || attachIndicatorSig() !== before) {
+          timer();
+          resolve(Date.now() <= deadline && attachIndicatorSig() !== before);
+        }
+      }, 300);
+    });
+
+  const attachPaste = async (p: StrategyParams): Promise<boolean> => {
+    const el = ctx.input as HTMLElement | null;
+    if (!el) return false;
+    const dt = buildDt();
+    if (!dt) return false;
+    const before = attachIndicatorSig();
+    el.focus();
+    await sleep(60);
+    try {
+      el.dispatchEvent(
+        new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        }),
+      );
+    } catch {
+      return false;
+    }
+    return waitForAttachFeedback(before, p.attachWaitMs ?? 8000);
+  };
+
+  const attachFileInput = async (p: StrategyParams): Promise<boolean> => {
+    const fs = getFiles();
+    if (!fs.length) return false;
+    const candidates: HTMLInputElement[] = [];
+    const push = (el: Element) => {
+      const input = el as HTMLInputElement;
+      if (input.type === 'file' && !candidates.includes(input)) {
+        candidates.push(input);
+      }
+    };
+    // 配置的上传入口选择器优先；再兜底扫全页（input[type=file] 常隐藏，不过滤可见性）
+    for (const sel of p.attachSelectors || []) {
+      for (const el of qsaSafe(sel)) push(el);
+    }
+    document.querySelectorAll('input[type="file"]').forEach(push);
+    if (!candidates.length) return false;
+    const before = attachIndicatorSig();
+    for (const input of candidates) {
+      try {
+        const dt = new DataTransfer();
+        for (const f of fs) dt.items.add(f);
+        input.files = dt.files;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        // 有反馈即成功；无反馈继续试下一个候选 input
+        if (await waitForAttachFeedback(before, Math.min(p.attachWaitMs ?? 8000, 6000))) {
+          return true;
+        }
+      } catch {
+        /* 下一个候选 */
+      }
+    }
+    return false;
+  };
+
+  const attachDrop = async (p: StrategyParams): Promise<boolean> => {
+    const el = (ctx.input as HTMLElement | null) ?? document.body;
+    const dt = buildDt();
+    if (!dt) return false;
+    const before = attachIndicatorSig();
+    try {
+      const init: DragEventInit = {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: dt,
+      };
+      el.dispatchEvent(new DragEvent('dragenter', init));
+      el.dispatchEvent(new DragEvent('dragover', init));
+      el.dispatchEvent(new DragEvent('drop', init));
+    } catch {
+      return false;
+    }
+    return waitForAttachFeedback(before, p.attachWaitMs ?? 8000);
   };
 
   // ---------- 提交策略 ----------
@@ -1212,6 +1390,9 @@ export async function runAutomation(
     'fill:paste': fillPaste,
     'fill:insert-text': fillInsertText,
     'fill:value-setter': fillValueSetter,
+    'attach:paste': attachPaste,
+    'attach:file-input': attachFileInput,
+    'attach:drop': attachDrop,
     'submit:enter': submitEnter,
     'submit:enabled-flip': submitEnabledFlip,
     'submit:proximate': submitProximate,
@@ -1301,6 +1482,8 @@ export async function runAutomation(
   send({ type: 'AI_SENDING' });
 
   for (const step of recipe.steps) {
+    // 无附件时整步跳过 attach：不上报、不跑链，保证存量流程与自愈记忆零变化
+    if (step.id === 'attach' && files.length === 0) continue;
     const stepTimeout = step.timeoutMs ?? 15_000;
     const stepStart = Date.now();
     let ok = false;
@@ -1366,6 +1549,14 @@ export async function runAutomation(
       ctx.pageTextBaseline = contentTextLen();
     }
 
+    // 附加成功后同样要重采基线：附件预览缩略图 / 文件 chip 既新增 DOM 块、
+    // 又计入内容文本，若沿用 fill 时的基线，提交判定会把「刚附加的预览」
+    // 误判成「已发送」。
+    if (ok && step.id === 'attach') {
+      ctx.blockBaseline = snapshotBlocks();
+      ctx.pageTextBaseline = contentTextLen();
+    }
+
     // 提交成功后、观察开始前：多数站点发送后会跳转到会话页，SPA 整页重渲染
     // 会让定位时采集的观察基线全部失效（旧元素已不在 DOM，所有块都成了
     // 「新增块」，历史对话会淹没真正的回答）。等渲染稳定后重采基线，
@@ -1393,7 +1584,9 @@ export async function runAutomation(
             ? '定位输入框'
             : step.id === 'fill'
               ? '写入问题'
-              : '自动发送';
+              : step.id === 'attach'
+                ? '附加文件'
+                : '自动发送';
         const tried = step.strategies.map((s) => s.kind).join('、');
         const snap = snapshotDom();
         const reason = `【AskAll · ${recipe.name}】${stepName}失败（已试：${tried}），请在平台手动发送${snapshotBrief(snap)}`;

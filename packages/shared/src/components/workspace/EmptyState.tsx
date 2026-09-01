@@ -29,7 +29,7 @@ export default function EmptyState() {
         <Composer
           value={draft}
           onValueChange={setDraft}
-          onSubmit={(t) => void ask(t)}
+          onSubmit={(t, attachments) => void ask(t, attachments)}
           autoFocus
         />
       </div>

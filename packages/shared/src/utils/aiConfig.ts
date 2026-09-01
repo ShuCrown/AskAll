@@ -13,6 +13,11 @@ export interface AiSelectors {
    * 注意：不要匹配到输入框（textarea/input），否则文本恒为问题内容会误报。
    */
   replyCandidates?: string[];
+  /**
+   * 附件上传入口候选选择器（按顺序尝试）：纸夹按钮 / input[type=file] / 拖放区。
+   * 缺省时引擎走通用 attach 策略链（paste → file-input → drop）。
+   */
+  attachSelectors?: string[];
 }
 
 export interface AiConfig {

@@ -8,7 +8,7 @@
  * 底部固定 Composer 用于追问。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink } from 'lucide-react';
+import { Check, Copy, ExternalLink, Paperclip } from 'lucide-react';
 import { getPlatform } from '../../lib/platform';
 import {
   buildTurns,
@@ -56,6 +56,20 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
           <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
             {turn.question}
           </p>
+          {turn.attachments && turn.attachments.length > 0 && (
+            <div className="mt-2 flex flex-wrap justify-end gap-1 border-t border-black/5 pt-2">
+              {turn.attachments.map((a, i) => (
+                <span
+                  key={`${a.name}-${i}`}
+                  className="flex max-w-[180px] items-center gap-1 rounded-md bg-white/70 px-1.5 py-0.5 text-[10px] text-foreground/70"
+                  title={`${a.name}（${Math.max(1, Math.round(a.size / 1024))}KB）`}
+                >
+                  <Paperclip className="h-2.5 w-2.5 shrink-0" />
+                  <span className="truncate">{a.name}</span>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
           <span className="text-[10px] text-muted-foreground/70">

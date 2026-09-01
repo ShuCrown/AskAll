@@ -25,6 +25,13 @@ export interface AiResult {
   error?: string;
 }
 
+/** 附件元数据（历史/任务中只存元信息，文件本体仅内存流转） */
+export interface AttachmentInfo {
+  name: string;
+  mime: string;
+  size: number;
+}
+
 export interface AskTask {
   id: string;
   question: string;
@@ -37,6 +44,8 @@ export interface AskTask {
    * 用于 AI_REPLY_DONE 时把回答快照写入正确的历史条目。
    */
   historyId?: string;
+  /** 本次提问携带的附件元数据（不含文件本体） */
+  attachments?: AttachmentInfo[];
   /** aiId -> 结果 */
   results: Record<string, AiResult>;
 }

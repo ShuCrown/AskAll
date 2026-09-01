@@ -13,7 +13,13 @@
  * 其中「打开 / 就绪 / 回写」在 background 侧完成（与页面 DOM 无关，天然稳定），
  * 这里只定义需要在页面上下文执行、因而容易受改版影响的五步。
  */
-export type StepId = 'locate' | 'fill' | 'submit' | 'confirm' | 'observe';
+export type StepId =
+  | 'locate'
+  | 'fill'
+  | 'attach'
+  | 'submit'
+  | 'confirm'
+  | 'observe';
 
 /**
  * 策略标识。命名规则 `<步骤>:<实现>`，引擎据此分发到具体实现。
@@ -31,6 +37,10 @@ export type StrategyKind =
   | 'fill:paste'
   | 'fill:insert-text'
   | 'fill:value-setter'
+  // 附加文件（仅当本次提问携带附件时执行）
+  | 'attach:paste'
+  | 'attach:file-input'
+  | 'attach:drop'
   // 提交发送
   | 'submit:enter'
   | 'submit:enabled-flip'
@@ -56,6 +66,14 @@ export interface SubmitParams {
   combo?: 'Enter' | 'Ctrl+Enter' | 'Meta+Enter';
 }
 
+/** 附加文件步骤参数 */
+export interface AttachParams {
+  /** 上传入口候选选择器（纸夹按钮 / input[type=file] / 拖放区），按顺序尝试 */
+  attachSelectors?: string[];
+  /** 附加后等待预览反馈的时长，默认 8000ms */
+  attachWaitMs?: number;
+}
+
 /** 观察步骤参数 */
 export interface ObserveParams {
   /** 回答区候选选择器（兜底策略使用） */
@@ -66,7 +84,18 @@ export interface ObserveParams {
   timeoutMs?: number;
 }
 
-export type StrategyParams = LocateParams & SubmitParams & ObserveParams;
+export type StrategyParams = LocateParams & SubmitParams & ObserveParams & AttachParams;
+
+/**
+ * 附件载荷（UI → background → 引擎注入参数）。
+ * dataUrl 为 `data:<mime>;base64,...`，只在内存链路流转，绝不写入历史存储。
+ */
+export interface AttachmentPayload {
+  name: string;
+  mime: string;
+  size: number;
+  dataUrl: string;
+}
 
 export interface StrategyDef {
   kind: StrategyKind | string;
