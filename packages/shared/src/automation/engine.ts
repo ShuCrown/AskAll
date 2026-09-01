@@ -714,7 +714,10 @@ export async function runAutomation(
     } catch {
       return false;
     }
-    return waitForAttachFeedback(before, p.attachWaitMs ?? 8000);
+    // 等预览反馈确认；无反馈时返回 false 让 file-input/drop 接力尝试——
+    // paste 在部分站点（如豆包的 tiptap）不触发上传，不能只凭「派发成功」
+    // 就断定已附加。链尾的 drop 是乐观成功，保证不会因检测假阴性而整单中止。
+    return waitForAttachFeedback(before, Math.min(p.attachWaitMs ?? 4000, 4000));
   };
 
   const attachFileInput = async (p: StrategyParams): Promise<boolean> => {
@@ -734,6 +737,10 @@ export async function runAutomation(
     document.querySelectorAll('input[type="file"]').forEach(push);
     if (!candidates.length) return false;
     const before = attachIndicatorSig();
+    // 乐观策略：只要成功写入 files 并派发 change 即视为已附加。预览反馈因站点
+    // 而异（缩略图延迟渲染 / 类名不匹配都会造成假阴性），假阴性的代价是整单
+    // 中止不发——比「发出一条缺附件的消息」更糟。有反馈则换下一个候选前确认。
+    let dispatched = false;
     for (const input of candidates) {
       try {
         const dt = new DataTransfer();
@@ -741,15 +748,16 @@ export async function runAutomation(
         input.files = dt.files;
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
-        // 有反馈即成功；无反馈继续试下一个候选 input
-        if (await waitForAttachFeedback(before, Math.min(p.attachWaitMs ?? 8000, 6000))) {
+        dispatched = true;
+        // 有反馈即确认成功；无反馈才试下一个候选 input
+        if (await waitForAttachFeedback(before, 3000)) {
           return true;
         }
       } catch {
         /* 下一个候选 */
       }
     }
-    return false;
+    return dispatched;
   };
 
   const attachDrop = async (p: StrategyParams): Promise<boolean> => {
@@ -769,7 +777,9 @@ export async function runAutomation(
     } catch {
       return false;
     }
-    return waitForAttachFeedback(before, p.attachWaitMs ?? 8000);
+    // 乐观成功：事件派发无异常即通过，预览反馈仅用于提前确认
+    await waitForAttachFeedback(before, Math.min(p.attachWaitMs ?? 4000, 4000));
+    return true;
   };
 
   // ---------- 提交策略 ----------
@@ -1549,10 +1559,13 @@ export async function runAutomation(
       ctx.pageTextBaseline = contentTextLen();
     }
 
-    // 附加成功后同样要重采基线：附件预览缩略图 / 文件 chip 既新增 DOM 块、
-    // 又计入内容文本，若沿用 fill 时的基线，提交判定会把「刚附加的预览」
-    // 误判成「已发送」。
+    // 附加成功后：重聚焦输入框（附件预览可能夺走焦点，submit:enter 依赖
+    // 输入框接收按键）、等站点处理完预览再重采基线（附件预览缩略图既新增
+    // DOM 块、又计入内容文本，若沿用 fill 时的基线，提交判定会把「刚附加
+    // 的预览」误判成「已发送」）。
     if (ok && step.id === 'attach') {
+      (ctx.input as HTMLElement | null)?.focus?.();
+      await sleep(1500);
       ctx.blockBaseline = snapshotBlocks();
       ctx.pageTextBaseline = contentTextLen();
     }
