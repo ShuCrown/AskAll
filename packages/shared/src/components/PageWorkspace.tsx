@@ -219,62 +219,66 @@ export default function PageWorkspace({
                 }
           }
         >
-          {/* 顶部拖拽标题栏 */}
+          {/* 顶部拖拽标题栏：左侧 = 品牌 + 功能操作（搜索/新话题/设置），右侧 = 窗口控制（最大化/收起/关闭） */}
           <div style={styles.header} onMouseDown={startDrag}>
-            <div style={styles.title}>
-              {logoFailed ? (
-                <span style={styles.logoFallback}>齐</span>
-              ) : (
-                <img
-                  src={getPlatform().assets.assetUrl('icon/128.png')}
-                  alt="齐问"
-                  className="askall-logo-img"
-                  style={styles.logo}
-                  onError={() => setLogoFailed(true)}
-                />
-              )}
-              <span>齐问</span>
+            <div style={styles.headerLeft}>
+              <div style={styles.title}>
+                {logoFailed ? (
+                  <span style={styles.logoFallback}>齐</span>
+                ) : (
+                  <img
+                    src={getPlatform().assets.assetUrl('icon/128.png')}
+                    alt="齐问"
+                    className="askall-logo-img"
+                    style={styles.logo}
+                    onError={() => setLogoFailed(true)}
+                  />
+                )}
+                <span>齐问</span>
+              </div>
+              <div style={styles.headerActions}>
+                <button
+                  type="button"
+                  style={styles.iconBtn}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSearchOpen(true);
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  aria-label="搜索历史"
+                  title="搜索历史"
+                >
+                  <Search style={{ width: 15, height: 15 }} />
+                </button>
+                <button
+                  type="button"
+                  style={styles.iconBtn}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    useAskStore.getState().newConversation();
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  aria-label="新话题"
+                  title="新话题"
+                >
+                  <SquarePen style={{ width: 15, height: 15 }} />
+                </button>
+                <button
+                  type="button"
+                  style={styles.iconBtn}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openSettings();
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  aria-label="设置"
+                  title="设置"
+                >
+                  <Settings style={{ width: 14, height: 14 }} />
+                </button>
+              </div>
             </div>
             <div style={styles.headerActions}>
-              <button
-                type="button"
-                style={styles.iconBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSearchOpen(true);
-                }}
-                onMouseDown={(e) => e.stopPropagation()}
-                aria-label="搜索历史"
-                title="搜索历史"
-              >
-                <Search style={{ width: 15, height: 15 }} />
-              </button>
-              <button
-                type="button"
-                style={styles.iconBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  useAskStore.getState().newConversation();
-                }}
-                onMouseDown={(e) => e.stopPropagation()}
-                aria-label="新话题"
-                title="新话题"
-              >
-                <SquarePen style={{ width: 15, height: 15 }} />
-              </button>
-              <button
-                type="button"
-                style={styles.iconBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openSettings();
-                }}
-                onMouseDown={(e) => e.stopPropagation()}
-                aria-label="设置"
-                title="设置"
-              >
-                <Settings style={{ width: 14, height: 14 }} />
-              </button>
               <button
                 type="button"
                 style={styles.iconBtn}
@@ -382,6 +386,11 @@ const styles: Record<string, CSSProperties> = {
     height: 36,
     padding: '0 10px',
     borderBottom: '1px solid hsl(220 13% 91%)',
+  },
+  headerLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
   },
   title: {
     display: 'flex',
