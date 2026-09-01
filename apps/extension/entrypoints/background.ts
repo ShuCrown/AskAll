@@ -42,24 +42,21 @@ export default defineBackground(() => {
     });
   });
 
-  // 右键菜单点击：在当前标签页上方弹出浮动面板（划词文本预填，无划词为空白新话题），
-  // 由用户在面板中确认发送——绝不自动直发。
-  // 若内容脚本未注入（页面在扩展安装/更新前已打开），先动态注入内容脚本并重试；
-  // 仍失败（受限页面等）只发系统通知提示，不再回退为直接发送。
-  browser.contextMenus.onClicked.addListener(async (info) => {
-    if (info.menuItemId !== MENU_ID) return;
+  /**
+   * 在当前标签页打开右侧浮动面板（右键菜单与工具栏图标共用的同一操作）：
+   * 向 content script 发 SHOW_PANEL（划词文本预填，无划词为空白新话题）；
+   * 未注入时动态注入并重试。返回是否成功，由调用方决定兜底行为。
+   */
+  async function openPanelInActiveTab(text: string): Promise<boolean> {
     const tabs = await browser.tabs.query({
       active: true,
       currentWindow: true,
     });
     const tabId = tabs[0]?.id;
-    if (tabId == null) return;
+    if (tabId == null) return false;
 
     const showPanel = () =>
-      browser.tabs.sendMessage(tabId, {
-        type: 'SHOW_PANEL',
-        text: info.selectionText ?? '',
-      });
+      browser.tabs.sendMessage(tabId, { type: 'SHOW_PANEL', text });
 
     // 动态注入后，内容脚本监听器注册与注入 Promise 之间可能有微小竞态：多重试几轮
     const showPanelRetry = async () => {
@@ -76,6 +73,7 @@ export default defineBackground(() => {
 
     try {
       await showPanel();
+      return true;
     } catch (e) {
       console.warn('[multi-ai-ask] 内容脚本未就绪，尝试动态注入:', e);
       try {
@@ -83,12 +81,38 @@ export default defineBackground(() => {
           target: { tabId },
           files: ['/content-scripts/content.js'],
         });
-        if (await showPanelRetry()) return;
+        if (await showPanelRetry()) return true;
         console.warn('[multi-ai-ask] 注入后仍无法打开面板');
       } catch (err) {
         console.warn('[multi-ai-ask] 无法注入内容脚本:', err);
       }
-      // 失败终态：通知用户，而不是把问答直接发出去
+      return false;
+    }
+  }
+
+  // 右键菜单点击：在当前标签页上方弹出浮动面板，由用户在面板中确认发送——
+  // 绝不自动直发。失败终态（受限页面等）：只发系统通知提示。
+  browser.contextMenus.onClicked.addListener(async (info) => {
+    if (info.menuItemId !== MENU_ID) return;
+    if (await openPanelInActiveTab(info.selectionText ?? '')) return;
+    // 失败终态：通知用户，而不是把问答直接发出去
+    notifyPanelUnavailable();
+  });
+
+  // 点击工具栏图标：与右键菜单完全同一个操作——在当前页面打开右侧浮动面板
+  // （不再弹独立 popup）。受限页面（chrome:// 等）无法注入时，兜底打开独立
+  // 工作台窗口（/workspace.html，原 popup 页）。
+  browser.action.onClicked.addListener(async () => {
+    if (await openPanelInActiveTab('')) return;
+    try {
+      await browser.windows.create({
+        url: getExtURL('/workspace.html'),
+        type: 'popup',
+        width: 800,
+        height: 600,
+      });
+    } catch (e) {
+      console.warn('[multi-ai-ask] 打开工作台窗口失败:', e);
       notifyPanelUnavailable();
     }
   });

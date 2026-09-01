@@ -107,6 +107,12 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
     set((s) => ({
       activeConvId: convId,
       liveTasks: { ...s.liveTasks, [task.id]: task },
+      // 扩展端 background 在 addHistory 后回填了 historyId，这里建立
+      // taskId -> historyId 映射，buildTurns 据此把实时任务合并进历史轮次
+      //（否则同一问题会渲染成「历史 + 孤儿实时」两条重复气泡）。
+      taskHistory: task.historyId
+        ? { ...s.taskHistory, [task.id]: task.historyId }
+        : s.taskHistory,
     }));
 
     if (platform.kind === 'tauri') {
@@ -125,12 +131,23 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
     } else {
       // 扩展端：background 异步写历史，轮询等待其落盘（最多 ~2s），
       // 期间右侧时间线仍可凭 liveTasks 展示实时进度。
+      // 轮询命中后建立 taskId -> historyId 映射（buildTurns 据此合并轮次，
+      // 否则同一问题会渲染成「历史 + 孤儿实时」两条重复气泡）。
+      // ASK_AI 不等 handleAsk 完成就返回，getTask 可能尚未回填 historyId，
+      // 故不能只依赖 task.historyId。
       const deadline = Date.now() + 2000;
       for (;;) {
         const items = await getHistory();
-        const found = items.some((h) => h.conversationId === convId);
-        set({ history: items });
-        if (found || Date.now() > deadline) break;
+        // convId 由本次任务独占，历史最新在前，首个命中即本任务条目
+        const item = items.find((h) => (h.conversationId || h.id) === convId);
+        set((s) => ({
+          history: items,
+          taskHistory:
+            item && !s.taskHistory[task.id]
+              ? { ...s.taskHistory, [task.id]: item.id }
+              : s.taskHistory,
+        }));
+        if (item || Date.now() > deadline) break;
         await new Promise((r) => setTimeout(r, 200));
       }
     }
@@ -169,9 +186,14 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
 
       // 恢复进行中的任务（popup 重开 / 冷启动均可续看进度）
       const liveTasks: Record<string, AskTask> = {};
+      const taskHistory: Record<string, string> = {};
       try {
         const { task } = await platform.ask.getTask();
-        if (task) liveTasks[task.id] = task;
+        if (task) {
+          liveTasks[task.id] = task;
+          // 恢复 taskId -> historyId 映射，避免时间线重复渲染同一轮次
+          if (task.historyId) taskHistory[task.id] = task.historyId;
+        }
       } catch {
         /* 取不到任务时按空处理 */
       }
@@ -182,6 +204,7 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
         configs,
         selected,
         liveTasks,
+        taskHistory,
         pinned,
       });
     },

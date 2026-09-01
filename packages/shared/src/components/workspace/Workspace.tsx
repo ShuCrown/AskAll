@@ -80,7 +80,7 @@ export default function Workspace({ hideTopActions = false }: WorkspaceProps) {
   }, [newConversation]);
 
   // OS 级划词/右键菜单提问（桌面端经 platform-tauri 派发；扩展端无此事件）：
-  // 切到新提问态并注入问题，由 Composer 预填并自动发送。
+  // 切到新提问态并注入问题，由 Composer 预填（不自动发送）。
   useEffect(() => {
     const onExternalAsk = (e: Event) => {
       const detail = (e as CustomEvent).detail as { text?: string } | undefined;

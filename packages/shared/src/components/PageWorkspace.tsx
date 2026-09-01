@@ -12,7 +12,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
-import { Minus, Search, Settings, SquarePen, X } from 'lucide-react';
+import { Maximize, Minimize, Minus, Search, Settings, SquarePen, X } from 'lucide-react';
 import { getPlatform } from '../lib/platform';
 import { useAskStore } from '../store/askStore';
 import Workspace from './workspace/Workspace';
@@ -37,6 +37,12 @@ export default function PageWorkspace({
   const [logoFailed, setLogoFailed] = useState(false);
   // 固定态恒为 true：面板默认钉在页面上，点击面板外部不自动关闭（pin 按钮已移除）
   const [minimized, setMinimized] = useState(false);
+  // 最大化：铺满视口；还原时回到最大化前记录的位置与尺寸
+  const [maximized, setMaximized] = useState(false);
+  const restoreRef = useRef<{
+    docked: boolean;
+    pos: { left: number; top: number };
+  } | null>(null);
   // 搜索历史弹窗（由标题栏「搜索」按钮触发，同 Workspace 顶部搜索）
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -64,6 +70,7 @@ export default function PageWorkspace({
   const cardRef = useRef<HTMLDivElement>(null);
 
   const startDrag = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (maximized) return;
     if ((e.target as HTMLElement).closest('button')) return;
     dragRef.current = {
       startX: e.clientX,
@@ -125,7 +132,7 @@ export default function PageWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 划词文本预填并自动发送（与桌面 OS 级划词一致，经 store 注入给 Composer）
+  // 划词文本预填（不自动发送，由用户确认后手动发送，经 store 注入给 Composer）
   const prefillRef = useRef(false);
   useEffect(() => {
     if (prefillRef.current) return;
@@ -148,6 +155,21 @@ export default function PageWorkspace({
 
   const openSettings = () => {
     getPlatform().window.openSettings().catch(() => {});
+  };
+
+  // 最大化 / 还原：最大化前记录当前停靠态与位置，还原时恢复到之前的宽高与位置
+  const toggleMaximize = () => {
+    if (!maximized) {
+      restoreRef.current = { docked, pos };
+      setMaximized(true);
+    } else {
+      setMaximized(false);
+      const r = restoreRef.current;
+      if (r) {
+        setDocked(r.docked);
+        setPos(r.pos);
+      }
+    }
   };
 
   return (
@@ -175,14 +197,27 @@ export default function PageWorkspace({
       ) : (
         <div
           ref={cardRef}
-          style={{
-            ...styles.card,
-            ...(docked ? { right: 16 } : { left: pos.left }),
-            top: docked ? 56 : pos.top,
-            width: `min(${PANEL_WIDTH}px, calc(100vw - 32px))`,
-            height: 'min(600px, calc(100vh - 72px))',
-            maxHeight: 'calc(100vh - 72px)',
-          }}
+          style={
+            maximized
+              ? {
+                  ...styles.card,
+                  left: 0,
+                  top: 0,
+                  width: '100vw',
+                  height: '100vh',
+                  maxHeight: '100vh',
+                  borderRadius: 0,
+                  border: 'none',
+                }
+              : {
+                  ...styles.card,
+                  ...(docked ? { right: 16 } : { left: pos.left }),
+                  top: docked ? 56 : pos.top,
+                  width: `min(${PANEL_WIDTH}px, calc(100vw - 32px))`,
+                  height: 'min(600px, calc(100vh - 72px))',
+                  maxHeight: 'calc(100vh - 72px)',
+                }
+          }
         >
           {/* 顶部拖拽标题栏 */}
           <div style={styles.header} onMouseDown={startDrag}>
@@ -243,7 +278,28 @@ export default function PageWorkspace({
               <button
                 type="button"
                 style={styles.iconBtn}
-                onClick={() => setMinimized(true)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleMaximize();
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+                aria-label={maximized ? '还原面板' : '最大化面板'}
+                title={maximized ? '还原面板' : '最大化面板'}
+              >
+                {maximized ? (
+                  <Minimize style={{ width: 14, height: 14 }} />
+                ) : (
+                  <Maximize style={{ width: 14, height: 14 }} />
+                )}
+              </button>
+              <button
+                type="button"
+                style={styles.iconBtn}
+                onClick={() => {
+                  setMinimized(true);
+                  // 收起时退出最大化，还原小浮窗后回到常规宽高
+                  setMaximized(false);
+                }}
                 aria-label="收起到右下角"
                 title="收起到右下角小浮窗"
               >

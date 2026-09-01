@@ -8,7 +8,7 @@
  *   - 点击行切换勾选、面板不关闭（多选）；Esc / 点击外部关闭；默认全勾选（enabled 项），
  *     选择持久化 local:lastSelectedAis。
  * 右侧为发送按钮；快捷键 ⌘/Ctrl+Enter 发送。
- * 外部注入的问题（pendingQuestion，OS 级划词等）自动预填并发送。
+ * 外部注入的问题（pendingQuestion，OS 级划词等）自动预填，由用户确认后发送。
  * 支持受控/非受控两种文本模式，便于空态页与时间线底部复用。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -70,18 +70,11 @@ export default function Composer({
     };
   }, [pickerOpen]);
 
-  // 外部问题注入：预填并自动发送（与旧 AskPanel 的 externalQuestion 行为一致）
-  const injectedRef = useRef(false);
+  // 外部问题注入：仅预填，由用户点击「发送」确认（不自动直发）
   useEffect(() => {
-    if (!pendingQuestion || injectedRef.current) return;
-    injectedRef.current = true;
-    const q = pendingQuestion;
-    setText(q);
+    if (!pendingQuestion) return;
+    setText(pendingQuestion);
     setPendingQuestion(null);
-    requestAnimationFrame(() => {
-      submit(q);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingQuestion]);
 
   const submit = (raw?: string) => {
