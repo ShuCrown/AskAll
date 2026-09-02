@@ -5,14 +5,15 @@
  * 两类特殊态：
  *   - fallback（自动发送失败）：警示样式 + 引导去源页面手动发送；
  *   - truncated（快照截断）：提示完整内容需到会话页查看。
- * 常驻操作：打开源会话 ↗、复制文本。
+ * 常驻操作：打开源会话 ↗。
  */
 import { useState } from 'react';
-import { Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
+import { ExternalLink, Loader2 } from 'lucide-react';
 import type { AiStatus } from '../../utils/task';
 import { isFallbackNotice } from '../../utils/history';
 import { getPlatform } from '../../lib/platform';
 import AiIcon from './AiIcon';
+import Tooltip from '../ui/tooltip';
 
 const STATUS_MAP: Record<AiStatus, { text: string; cls: string }> = {
   opening: { text: '准备中', cls: 'bg-muted text-muted-foreground' },
@@ -41,7 +42,6 @@ export default function AiAnswerCard({
   truncated?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
   const fallback = isFallbackNotice(text);
   const badge = STATUS_MAP[status] ?? STATUS_MAP.opening;
 
@@ -53,23 +53,13 @@ export default function AiAnswerCard({
       .catch(() => {});
   };
 
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* 剪贴板不可用时静默 */
-    }
-  };
-
   const lines = text.split('\n').length;
   const needCollapse = lines > COLLAPSE_LINES || text.length > 480;
   const bodyCls =
     !expanded && needCollapse ? 'line-clamp-[8] overflow-hidden' : '';
 
   return (
-    <div className="flex flex-col rounded-md border bg-card">
+    <div className="flex min-w-0 flex-col rounded-md border bg-card">
       {/* 头部：图标 + 名称 + 状态徽章 + 操作 */}
       <div className="flex items-center justify-between gap-2 border-b px-2.5 py-1.5">
         <span className="flex min-w-0 items-center gap-1.5">
@@ -80,29 +70,16 @@ export default function AiAnswerCard({
           <span className={`rounded px-1.5 py-0.5 text-[10px] ${badge.cls}`}>
             {fallback ? '需手动发送' : badge.text}
           </span>
-          {text && !fallback && (
-            <button
-              type="button"
-              title="复制回答"
-              onClick={copy}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              {copied ? (
-                <Check className="h-3.5 w-3.5 text-green-600" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-            </button>
-          )}
           {url && (
-            <button
-              type="button"
-              title="打开源会话"
-              onClick={openSource}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-            </button>
+            <Tooltip content="打开源会话">
+              <button
+                type="button"
+                onClick={openSource}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </button>
+            </Tooltip>
           )}
         </span>
       </div>

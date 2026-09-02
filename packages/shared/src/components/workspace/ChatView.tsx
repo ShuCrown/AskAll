@@ -7,7 +7,7 @@
  *   - 历史侧：history.answers 快照（已落盘的最终回答）。
  * 底部固定 Composer 用于追问。
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, Paperclip } from 'lucide-react';
 import { getPlatform } from '../../lib/platform';
 import {
@@ -19,6 +19,8 @@ import { ANSWER_MAX_LEN } from '../../utils/history';
 import type { AiStatus } from '../../utils/task';
 import AiAnswerCard from './AiAnswerCard';
 import Composer from './Composer';
+import Tooltip from '../ui/tooltip';
+import { PanelExpandedContext } from '../panel-mode';
 
 /** 判断快照文本是否被截断过（truncateAnswer 的尾部标记） */
 function isTruncated(text: string): boolean {
@@ -73,7 +75,7 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
     : null;
 
   return (
-    <div className="group flex flex-col gap-2">
+    <div className="group flex min-w-0 flex-col gap-2">
       {/* 问题气泡：右对齐，#eeeeee 背景，最大 70% 宽度 */}
       <div className="flex flex-col items-end gap-1">
         <div className="max-w-[70%] rounded-2xl bg-[#eeeeee] px-4 py-3">
@@ -106,24 +108,25 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
               second: '2-digit',
             })}
           </span>
-          <button
-            type="button"
-            onClick={copyQuestion}
-            title="复制问题"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            {copied ? (
-              <Check className="h-3 w-3 text-green-600" />
-            ) : (
-              <Copy className="h-3 w-3" />
-            )}
-          </button>
+          <Tooltip content={copied ? '已复制' : '复制问题'}>
+            <button
+              type="button"
+              onClick={copyQuestion}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              {copied ? (
+                <Check className="h-3 w-3 text-green-600" />
+              ) : (
+                <Copy className="h-3 w-3" />
+              )}
+            </button>
+          </Tooltip>
         </div>
       </div>
 
       {/* 回答卡片 */}
       {liveResults ? (
-        <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+        <div className="grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2">
           {liveResults.map((r) => (
             <AiAnswerCard
               key={r.aiId}
@@ -137,7 +140,7 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
           ))}
         </div>
       ) : answers && answers.length > 0 ? (
-        <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+        <div className="grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2">
           {answers.map((snap, i) => {
             const link =
               snap.url ??
@@ -190,6 +193,8 @@ export default function ChatView({ convKey }: { convKey: string }) {
   const history = useAskStore((s) => s.history);
   const liveTasks = useAskStore((s) => s.liveTasks);
   const taskHistory = useAskStore((s) => s.taskHistory);
+  // 面板最大化时内容区铺满宽度（默认阅读宽度 max-w-3xl）
+  const expanded = useContext(PanelExpandedContext);
 
   const turns = useMemo(
     () => buildTurns({ history, liveTasks, taskHistory }, convKey),
@@ -246,8 +251,17 @@ export default function ChatView({ convKey }: { convKey: string }) {
   return (
     <div className="flex h-full flex-col">
       {/* 时间线（始终展示所有 AI 的回答） */}
-      <div ref={timelineRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <div
+        ref={timelineRef}
+        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3"
+      >
+        <div
+          className={
+            expanded
+              ? 'flex min-w-0 flex-col gap-4'
+              : 'mx-auto flex min-w-0 max-w-4xl flex-col gap-4'
+          }
+        >
           {turns.map((turn, i) => (
             <TurnBlock
               key={turn.historyId ?? turn.taskId ?? i}
@@ -266,9 +280,9 @@ export default function ChatView({ convKey }: { convKey: string }) {
         </div>
       )}
 
-      {/* 追问输入 */}
+      {/* 追问输入（宽度与时间线内容一致：默认居中阅读宽，最大化铺满） */}
       <div className="shrink-0 border-t px-4 py-3">
-        <div className="mx-auto max-w-3xl">
+        <div className={expanded ? 'min-w-0' : 'mx-auto min-w-0 max-w-4xl'}>
           <Composer placeholder="继续追问，将发送至所选 AI 的当前会话…" />
         </div>
       </div>
