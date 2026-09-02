@@ -7,8 +7,15 @@
  *   - 历史侧：history.answers 快照（已落盘的最终回答）。
  * 底部固定 Composer 用于追问。
  */
-import { useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, Paperclip } from 'lucide-react';
+import {
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { Check, Copy, Paperclip } from 'lucide-react';
 import { getPlatform } from '../../lib/platform';
 import {
   buildTurns,
@@ -36,14 +43,6 @@ function TurnBlock({
   index: number;
   layout: 'grid' | 'single';
 }) {
-  const openSource = (link?: { id?: string; name: string; url: string }) => {
-    if (!link?.url) return;
-    // 携带 id/name：桌面端复用该 AI 的 ai-{id} 子窗口（保留当前聊天状态）
-    getPlatform()
-      .ask.openAiTab(link.url, link.id, link.name)
-      .catch(() => {});
-  };
-
   const [copied, setCopied] = useState(false);
   const copyQuestion = async () => {
     try {
@@ -149,7 +148,9 @@ function TurnBlock({
             return (
               <div
                 key={r.aiId}
-                className={oddFull ? 'min-w-0 xl:col-span-2' : 'min-w-0'}
+                className={
+                  oddFull ? 'h-full min-w-0 xl:col-span-2' : 'h-full min-w-0'
+                }
               >
                 <AiAnswerCard
                   aiId={r.aiId}
@@ -186,7 +187,9 @@ function TurnBlock({
             return (
               <div
                 key={`${snap.aiId ?? snap.name}-${i}`}
-                className={oddFull ? 'min-w-0 xl:col-span-2' : 'min-w-0'}
+                className={
+                  oddFull ? 'h-full min-w-0 xl:col-span-2' : 'h-full min-w-0'
+                }
               >
                 <AiAnswerCard
                   aiId={snap.aiId}
@@ -204,26 +207,39 @@ function TurnBlock({
             );
           })}
         </div>
-      ) : (
-        <div className="flex flex-wrap gap-1.5">
-          {turn.aiUrls.map((link, i) => (
-            <button
-              key={`${link.name}-${i}`}
-              type="button"
-              onClick={() => openSource(link)}
-              className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-1 text-xs text-secondary-foreground transition-colors hover:bg-accent"
-            >
-              <ExternalLink className="h-3 w-3" />
-              {link.name}
-            </button>
-          ))}
-          {turn.aiUrls.length > 0 && (
-            <span className="self-center text-[11px] text-muted-foreground/70">
-              早期记录未保存回答内容，点击跳转会话页查看
-            </span>
-          )}
+      ) : turn.aiUrls.length > 0 ? (
+        // 早期记录未保存回答内容：按新 chat 卡片展示，内容占位「暂无返回内容」
+        <div
+          className={
+            layout === 'single'
+              ? 'grid min-w-0 grid-cols-1 gap-2'
+              : 'grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2'
+          }
+        >
+          {turn.aiUrls.map((link, i) => {
+            const oddFull =
+              layout === 'grid' &&
+              turn.aiUrls.length % 2 === 1 &&
+              i === turn.aiUrls.length - 1;
+            return (
+              <div
+                key={`${link.name}-${i}`}
+                className={
+                  oddFull ? 'h-full min-w-0 xl:col-span-2' : 'h-full min-w-0'
+                }
+              >
+                <AiAnswerCard
+                  aiId={link.id}
+                  name={link.name}
+                  status="done"
+                  text="暂无返回内容"
+                  url={link.url}
+                />
+              </div>
+            );
+          })}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -280,12 +296,20 @@ export default function ChatView({ convKey }: { convKey: string }) {
     return () => el.removeEventListener('scroll', onScroll);
   }, []);
 
-  useEffect(() => {
+  // 流式更新跟随：用 useLayoutEffect（paint 前同步滚动）消除「先渲染增高再回拉」
+  // 造成的抖动，并用 rAF 合并同一帧内的多次内容更新，避免高频 setScrollTop。
+  useLayoutEffect(() => {
     const el = timelineRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+    if (!el || !stickRef.current) return;
+    const raf = requestAnimationFrame(() => {
+      const cur = timelineRef.current;
+      if (cur && stickRef.current) cur.scrollTop = cur.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
   }, [liveSignature]);
 
-  useEffect(() => {
+  // 新增轮次时无条件跳底
+  useLayoutEffect(() => {
     const el = timelineRef.current;
     if (el) el.scrollTop = el.scrollHeight;
     stickRef.current = true;

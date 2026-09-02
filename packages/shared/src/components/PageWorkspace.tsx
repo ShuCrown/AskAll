@@ -310,12 +310,12 @@ export default function PageWorkspace({
                   )}
                 </button>
               </Tooltip>
-              <Tooltip content="收起到右下角小浮窗">
+              <Tooltip content="收起隐藏">
                 <button
                   type="button"
                   style={styles.iconBtn}
                   onClick={() => setMinimized(true)}
-                  aria-label="收起到右下角"
+                  aria-label="收起隐藏"
                 >
                   <Minus style={{ width: 16, height: 16 }} />
                 </button>
