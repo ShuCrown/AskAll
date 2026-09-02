@@ -43,6 +43,7 @@ export default defineConfig({
       'https://yiyan.baidu.com/*',
       'https://www.qianwen.com/*',
       'https://tongyi.aliyun.com/*',
+      'https://yuanbao.tencent.com/*',
       // 新增 AI 网站时，需在此追加对应的 host 权限（executeScript 注入需要）
     ],
     action: {

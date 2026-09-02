@@ -27,7 +27,15 @@ function isTruncated(text: string): boolean {
   return text.includes('…[内容已截断');
 }
 
-function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
+function TurnBlock({
+  turn,
+  index,
+  layout,
+}: {
+  turn: TurnView;
+  index: number;
+  layout: 'grid' | 'single';
+}) {
   const openSource = (link?: { id?: string; name: string; url: string }) => {
     if (!link?.url) return;
     // 携带 id/name：桌面端复用该 AI 的 ai-{id} 子窗口（保留当前聊天状态）
@@ -124,23 +132,45 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
         </div>
       </div>
 
-      {/* 回答卡片 */}
+      {/* 回答卡片（布局：田字格多列 / 单列；多列下奇数数量最后一张占满整行） */}
       {liveResults ? (
-        <div className="grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2">
-          {liveResults.map((r) => (
-            <AiAnswerCard
-              key={r.aiId}
-              aiId={r.aiId}
-              name={r.aiName}
-              status={r.status as AiStatus}
-              text={r.answer}
-              url={r.url}
-              truncated={r.answer.length >= ANSWER_MAX_LEN}
-            />
-          ))}
+        <div
+          className={
+            layout === 'single'
+              ? 'grid min-w-0 grid-cols-1 gap-2'
+              : 'grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2'
+          }
+        >
+          {liveResults.map((r, i) => {
+            const oddFull =
+              layout === 'grid' &&
+              liveResults.length % 2 === 1 &&
+              i === liveResults.length - 1;
+            return (
+              <div
+                key={r.aiId}
+                className={oddFull ? 'min-w-0 xl:col-span-2' : 'min-w-0'}
+              >
+                <AiAnswerCard
+                  aiId={r.aiId}
+                  name={r.aiName}
+                  status={r.status as AiStatus}
+                  text={r.answer}
+                  url={r.url}
+                  truncated={r.answer.length >= ANSWER_MAX_LEN}
+                />
+              </div>
+            );
+          })}
         </div>
       ) : answers && answers.length > 0 ? (
-        <div className="grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2">
+        <div
+          className={
+            layout === 'single'
+              ? 'grid min-w-0 grid-cols-1 gap-2'
+              : 'grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2'
+          }
+        >
           {answers.map((snap, i) => {
             const link =
               snap.url ??
@@ -148,20 +178,28 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
                 (u) =>
                   (snap.aiId && u.id === snap.aiId) || u.name === snap.name,
               )?.url;
+            const oddFull =
+              layout === 'grid' &&
+              answers.length % 2 === 1 &&
+              i === answers.length - 1;
             return (
-              <AiAnswerCard
+              <div
                 key={`${snap.aiId ?? snap.name}-${i}`}
-                aiId={snap.aiId}
-                name={snap.name}
-                status={snap.status === 'error' ? 'error' : 'done'}
-                text={
-                  snap.status === 'error'
-                    ? '【AskAll】未能自动发送，请在平台手动发送。'
-                    : snap.text
-                }
-                url={link}
-                truncated={isTruncated(snap.text)}
-              />
+                className={oddFull ? 'min-w-0 xl:col-span-2' : 'min-w-0'}
+              >
+                <AiAnswerCard
+                  aiId={snap.aiId}
+                  name={snap.name}
+                  status={snap.status === 'error' ? 'error' : 'done'}
+                  text={
+                    snap.status === 'error'
+                      ? '【AskAll】未能自动发送，请在平台手动发送。'
+                      : snap.text
+                  }
+                  url={link}
+                  truncated={isTruncated(snap.text)}
+                />
+              </div>
             );
           })}
         </div>
@@ -195,6 +233,18 @@ export default function ChatView({ convKey }: { convKey: string }) {
   const taskHistory = useAskStore((s) => s.taskHistory);
   // 面板最大化时内容区铺满宽度（默认阅读宽度 max-w-3xl）
   const expanded = useContext(PanelExpandedContext);
+  // 聊天卡片布局（田字格/单列）：设置页可配，focus 面板时刷新以同步设置改动
+  const [chatLayout, setChatLayout] = useState<'grid' | 'single'>('grid');
+  useEffect(() => {
+    const read = () => {
+      getPlatform()
+        .storage.getItem('local:chatLayout')
+        .then((v) => setChatLayout(v === 'single' ? 'single' : 'grid'));
+    };
+    read();
+    window.addEventListener('focus', read);
+    return () => window.removeEventListener('focus', read);
+  }, []);
 
   const turns = useMemo(
     () => buildTurns({ history, liveTasks, taskHistory }, convKey),
@@ -267,6 +317,7 @@ export default function ChatView({ convKey }: { convKey: string }) {
               key={turn.historyId ?? turn.taskId ?? i}
               turn={turn}
               index={i}
+              layout={chatLayout}
             />
           ))}
         </div>

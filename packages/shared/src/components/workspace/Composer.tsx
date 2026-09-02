@@ -68,13 +68,20 @@ export default function Composer({
     else setInner(v);
   };
 
-  // AI 选择下拉：点击展开（Select 形态），Esc / 点击外部关闭
+  // AI 选择下拉：点击展开（Select 形态），Esc / 点击外部（失焦）关闭
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!pickerOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (!pickerRef.current?.contains(e.target as Node)) setPickerOpen(false);
+      // 面板在 shadow DOM 里，document 层监听的 e.target 会被事件重定向为
+      // 宿主元素，contains 判断永远 false——点击下拉内部的行也会被当成
+      // 「点击外部」而关闭，多选/取消选中被打断。用 composedPath 取含
+      // shadow 内实际元素的完整路径判断：点击行内不关闭，点击外部才关闭。
+      const path = e.composedPath();
+      if (!path.includes(pickerRef.current as unknown as EventTarget)) {
+        setPickerOpen(false);
+      }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setPickerOpen(false);
@@ -229,7 +236,7 @@ export default function Composer({
             aria-expanded={pickerOpen}
             title="选择发送给哪些 AI（可多选）"
             className={cn(
-              'flex h-7 max-w-[200px] items-center gap-1 rounded-md border px-1.5 text-xs transition-colors',
+              'flex h-7 items-center gap-1 rounded-md border px-1.5 text-xs transition-colors',
               pickerOpen
                 ? 'border-primary/50 bg-accent text-accent-foreground'
                 : 'border-input bg-secondary/60 text-secondary-foreground hover:bg-accent hover:text-accent-foreground',
@@ -238,7 +245,7 @@ export default function Composer({
             {selectedCount > 0 ? (
               <span className="flex min-w-0 items-center">
                 <span className="flex items-center -space-x-1">
-                  {selectedAis.slice(0, 3).map((a) => (
+                  {selectedAis.map((a) => (
                     <span
                       key={a.id}
                       className="rounded-full bg-background ring-1 ring-border"
@@ -247,11 +254,6 @@ export default function Composer({
                     </span>
                   ))}
                 </span>
-                {selectedCount > 3 && (
-                  <span className="ml-1 shrink-0 rounded bg-muted px-1 text-[10px] leading-4 text-muted-foreground">
-                    +{selectedCount - 3}
-                  </span>
-                )}
               </span>
             ) : (
               <span className="flex items-center gap-1 px-0.5 text-muted-foreground">

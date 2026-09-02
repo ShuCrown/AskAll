@@ -184,7 +184,7 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'qwen',
     name: '通义千问',
-    version: 1,
+    version: 2,
     url: 'https://www.qianwen.com/',
     steps: genericSteps(
       [
@@ -195,6 +195,21 @@ export const DEFAULT_RECIPES: Recipe[] = [
       ],
       ['button[aria-label="发送消息"]', 'button[aria-label*="发送"]'],
       ['[class*="markdown"]'],
+    ),
+  },
+  {
+    id: 'yuanbao',
+    name: '元宝',
+    version: 1,
+    url: 'https://yuanbao.tencent.com/',
+    steps: genericSteps(
+      ['textarea', 'div[contenteditable="true"]', 'div[role="textbox"]'],
+      [
+        'button[aria-label*="发送"]',
+        'button[aria-label*="Send"]',
+        'button[class*="send"]',
+      ],
+      ['[class*="markdown"]', '[class*="answer"]'],
     ),
   },
 ];

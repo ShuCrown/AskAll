@@ -41,20 +41,22 @@ export interface AiConfig {
 
 /**
  * 合并默认配置与存储配置。
- * 内置项始终以最新 DEFAULT_AI_CONFIGS 为准（含最新选择器），
- * 仅保留用户的启停状态；自定义项原样保留。
+ * 内置项始终以最新 DEFAULT_AI_CONFIGS 为准（含最新选择器），仅保留用户的启停状态；
+ * 内置项顺序按用户存储中的顺序（设置面板箭头调序生效），新出现的默认项补在默认段末尾；
+ * 自定义项原样保留、跟在默认项之后。
  */
 export function mergeConfigs(stored: AiConfig[] | null): AiConfig[] {
   if (!stored) return DEFAULT_AI_CONFIGS;
   const defaultIds = DEFAULT_AI_CONFIGS.map((d) => d.id);
   const userConfigs = stored.filter((c) => !defaultIds.includes(c.id));
-  return [
-    ...DEFAULT_AI_CONFIGS.map((d) => {
-      const existing = stored.find((c) => c.id === d.id);
-      return existing ? { ...d, enabled: existing.enabled } : d;
-    }),
-    ...userConfigs,
-  ];
+  const storedDefaults = stored.filter((c) => defaultIds.includes(c.id));
+  const existingIds = new Set(storedDefaults.map((c) => c.id));
+  const newDefaults = DEFAULT_AI_CONFIGS.filter((d) => !existingIds.has(d.id));
+  const defaults = [...storedDefaults, ...newDefaults].map((d) => {
+    const base = DEFAULT_AI_CONFIGS.find((x) => x.id === d.id);
+    return base ? { ...base, enabled: d.enabled } : d;
+  });
+  return [...defaults, ...userConfigs];
 }
 
 export const DEFAULT_AI_CONFIGS: AiConfig[] = [
@@ -180,6 +182,33 @@ export const DEFAULT_AI_CONFIGS: AiConfig[] = [
       sendButton: 'button[aria-label="发送消息"]',
       sendButtonCandidates: [
         'button[aria-label="发送消息"]',
+        'button[aria-label*="发送"]',
+        'button[aria-label*="Send"]',
+        'button[class*="send"]',
+      ],
+      replyCandidates: [
+        '[class*="markdown"]',
+        '[class*="answer"]',
+        '[class*="response"]',
+      ],
+    },
+  },
+  {
+    id: 'yuanbao',
+    name: '元宝',
+    url: 'https://yuanbao.tencent.com/',
+    enabled: true,
+    autoSend: true,
+    isDefault: true,
+    selectors: {
+      input: 'textarea',
+      inputCandidates: [
+        'textarea',
+        'div[contenteditable="true"]',
+        'div[role="textbox"]',
+      ],
+      sendButton: 'button[aria-label*="发送"]',
+      sendButtonCandidates: [
         'button[aria-label*="发送"]',
         'button[aria-label*="Send"]',
         'button[class*="send"]',
