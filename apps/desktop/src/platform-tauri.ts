@@ -160,10 +160,11 @@ export const tauriPlatform: PlatformApi = {
       const configs = await resolveConfigs(aiIds);
       await invoke('ask_ai', { text, configs, mode });
     },
-    followUp: async (text, aiIds) => {
+    followUp: async (text, aiIds, _attachments, conversationId) => {
       const mode = readOpenMode();
       const configs = await resolveConfigs(aiIds);
-      await invoke('ask_ai_followup', { text, configs, mode });
+      // 携带当前会话 id：Rust 优先复用，避免应用重启后追问被当成新话题
+      await invoke('ask_ai_followup', { text, configs, mode, conversationId });
     },
     getTask: async () => {
       const task = await invoke<AskTask | null>('get_task');

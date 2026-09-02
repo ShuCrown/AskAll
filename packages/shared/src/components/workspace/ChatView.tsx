@@ -278,7 +278,7 @@ export default function ChatView({ convKey }: { convKey: string }) {
   ).length;
 
   // 时间线自动滚动：贴底跟随流式更新，但用户上滑（离开底部）即暂停，滚回底部恢复；
-  // 新增轮次时无条件跳底。直接设 scrollTop 而非 scrollIntoView：避免连带滚动宿主页面。
+  // 新增轮次时仅当贴底才跳底。直接设 scrollTop 而非 scrollIntoView：避免连带滚动宿主页面。
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const liveSignature = liveResults
@@ -308,11 +308,11 @@ export default function ChatView({ convKey }: { convKey: string }) {
     return () => cancelAnimationFrame(raf);
   }, [liveSignature]);
 
-  // 新增轮次时无条件跳底
+  // 新增轮次时跳底：仅当用户本就贴底才跳底，并保持跟随；
+  // 用户已上滚（stickRef=false）时不打断其阅读位置，也不强制重置跟随状态。
   useLayoutEffect(() => {
     const el = timelineRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-    stickRef.current = true;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
   }, [turns.length]);
 
   if (turns.length === 0) {

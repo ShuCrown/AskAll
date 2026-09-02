@@ -362,6 +362,8 @@ async fn run_one_ai(
 }
 
 /// ask / followup 的公共编排逻辑。
+/// `conversation_id` 仅追问时可由前端传入（延续指定会话，不依赖内存当前任务），
+/// 避免应用重启后追问被当成新话题。
 async fn dispatch_ask(
     app: tauri::AppHandle,
     state: &AppState,
@@ -369,6 +371,7 @@ async fn dispatch_ask(
     configs: Vec<AiConfig>,
     mode: String,
     follow_up: bool,
+    conversation_id: Option<String>,
 ) -> Result<(), String> {
     if configs.is_empty() {
         return Err("未选择任何 AI".into());
@@ -377,9 +380,11 @@ async fn dispatch_ask(
     // 新任务开始时清空上一轮的「已完成」记录：保活心跳只关心当前任务
     state.done_replies.lock().await.clear();
 
-    // 会话归属：追问复用当前任务的 conversationId（延续同一话题）；
-    // 新提问总是开启新会话（否则「新话题」会被追加进上一个话题）。
-    let conversation_id = if follow_up {
+    // 会话归属：追问优先用前端传入的会话 id；否则复用当前任务的 conversationId
+    // （延续同一话题）；新提问总是开启新会话（否则「新话题」会被追加进上一个话题）。
+    let conversation_id = if let Some(id) = conversation_id {
+        id
+    } else if follow_up {
         let guard = state.current_task.lock().await;
         guard
             .as_ref()
@@ -435,7 +440,7 @@ async fn ask_ai(
     configs: Vec<AiConfig>,
     mode: String,
 ) -> Result<(), String> {
-    dispatch_ask(app, state.inner(), text, configs, mode, false).await
+    dispatch_ask(app, state.inner(), text, configs, mode, false, None).await
 }
 
 #[tauri::command]
@@ -445,8 +450,9 @@ async fn ask_ai_followup(
     text: String,
     configs: Vec<AiConfig>,
     mode: String,
+    conversation_id: Option<String>,
 ) -> Result<(), String> {
-    dispatch_ask(app, state.inner(), text, configs, mode, true).await
+    dispatch_ask(app, state.inner(), text, configs, mode, true, conversation_id).await
 }
 
 #[tauri::command]

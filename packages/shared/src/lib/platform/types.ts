@@ -83,8 +83,16 @@ export interface PlatformAsk {
   /**
    * 追问：延续当前会话（复用已打开的聊天页），生成新任务。
    * `attachments` 语义同 ask。
+   * `conversationId` 可选：指定要延续的会话 id（前端当前激活会话）。
+   * 后台/后端优先使用它，避免 service worker 休眠重启后内存会话状态丢失、
+   * 追问被误判为新话题。
    */
-  followUp(text: string, aiIds?: string[], attachments?: AttachmentPayload[]): Promise<void>;
+  followUp(
+    text: string,
+    aiIds?: string[],
+    attachments?: AttachmentPayload[],
+    conversationId?: string,
+  ): Promise<void>;
   /** 获取当前任务（含各 AI 结果）。 */
   getTask(): Promise<{ task: AskTask | null }>;
   /**

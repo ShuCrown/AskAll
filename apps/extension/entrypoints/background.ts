@@ -301,6 +301,8 @@ export default defineBackground(() => {
         msg.text,
         msg.aiIds,
         sanitizeAttachments(msg.attachments),
+        // 前端携带的当前会话 id：优先复用，避免 SW 重启后追问被当成新话题
+        typeof msg.conversationId === 'string' ? msg.conversationId : undefined,
       );
       return;
     }
@@ -623,11 +625,14 @@ export default defineBackground(() => {
   /**
    * 追问：延续当前会话（复用 conversationId 与已打开的聊天窗口），
    * 生成新任务（新 taskId）以区分不同轮次的结果，避免互相覆盖。
+   * 优先使用前端传来的会话 id（不依赖内存 currentConversationId，
+   * 避免 service worker 休眠重启后追问被当成新话题）。
    */
   async function handleFollowUp(
     text: string,
     aiIds?: string[],
     attachments: AttachmentPayload[] = [],
+    conversationId?: string,
   ) {
     const { aiConfigs } = await loadContext();
     const question = text.trim();
@@ -645,16 +650,16 @@ export default defineBackground(() => {
     // 自愈记忆一次性读取，供各 AI 的 Recipe 重排策略顺序
     const memory = await loadMemory();
 
-    // 延续上一个会话；若没有（如后台重启后），则作为新会话发起
-    const conversationId = currentConversationId ?? genId();
-    currentConversationId = conversationId;
+    // 延续会话：前端传入的会话 id 优先；否则回退内存记录；再无则新会话
+    const convId = conversationId ?? currentConversationId ?? genId();
+    currentConversationId = convId;
 
     const taskId = genId();
     const task: AskTask = {
       id: taskId,
       question,
       createdAt: Date.now(),
-      conversationId,
+      conversationId: convId,
       ...(attachments.length ? { attachments: attachmentMeta(attachments) } : {}),
       results: {},
     };
@@ -679,7 +684,7 @@ export default defineBackground(() => {
       question,
       targets.map((ai) => ai.name),
       aiUrls,
-      conversationId,
+      convId,
       attachments.length ? attachmentMeta(attachments) : undefined,
     );
     // 回填历史条目 id：AI_REPLY_DONE 时据此把回答快照写入正确的历史记录

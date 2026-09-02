@@ -1117,6 +1117,13 @@ var AskAllEngine = (() => {
         };
         const check = () => {
           if (Date.now() - startedAt > timeout2) {
+            if (lastText) {
+              send({
+                type: "AI_REPLY_DONE",
+                text: lastText,
+                url: location.href
+              });
+            }
             finish(!!lastText);
             return;
           }
@@ -1201,6 +1208,13 @@ var AskAllEngine = (() => {
         };
         const check = () => {
           if (Date.now() - startedAt > timeout2) {
+            if (sawNew && lastText) {
+              send({
+                type: "AI_REPLY_DONE",
+                text: lastText,
+                url: location.href
+              });
+            }
             finish(sawNew);
             return;
           }
@@ -1257,6 +1271,13 @@ var AskAllEngine = (() => {
             timer();
             unregisterPing(check);
             detachWake();
+            if (lastText) {
+              send({
+                type: "AI_REPLY_DONE",
+                text: lastText,
+                url: location.href
+              });
+            }
             resolve(!!lastText);
             return;
           }

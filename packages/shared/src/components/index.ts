@@ -7,6 +7,7 @@ export { default as Workspace } from './workspace/Workspace';
 export { default as GridChat } from './workspace/GridChat';
 export { default as ChatView } from './workspace/ChatView';
 export { default as AiAnswerCard } from './workspace/AiAnswerCard';
+export { default as Markdown } from './workspace/Markdown';
 export { default as Composer } from './workspace/Composer';
 export { default as EmptyState } from './workspace/EmptyState';
 export { default as SettingsApp } from './workspace/SettingsApp';

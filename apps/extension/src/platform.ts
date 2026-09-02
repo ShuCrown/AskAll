@@ -86,13 +86,15 @@ export const extensionPlatform: PlatformApi = {
           ...(attachments?.length ? { attachments } : {}),
         })
         .then(() => undefined),
-    followUp: (text, aiIds, attachments) =>
+    followUp: (text, aiIds, attachments, conversationId) =>
       browser.runtime
         .sendMessage({
           type: 'ASK_AI_FOLLOWUP',
           text,
           aiIds,
           ...(attachments?.length ? { attachments } : {}),
+          // 携带当前会话 id：后台优先复用，避免 SW 重启后追问被当成新话题
+          ...(conversationId ? { conversationId } : {}),
         })
         .then(() => undefined),
     getTask: async () => {

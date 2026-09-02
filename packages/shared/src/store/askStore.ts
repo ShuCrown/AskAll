@@ -100,10 +100,34 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
    *   1. getTask() 取回编排器创建的任务（含 taskId / conversationId）；
    *   2. 桌面端：由 store 写入历史（扩展端由 background 写，此处仅轮询等待）；
    *   3. 激活该会话，驱动右侧时间线展示实时进度。
+   *
+   * 时序注意：dispatch 是异步的 —— 插件端 background 的 handleAsk/handleFollowUp
+   * 会先 await loadContext 等，随后才设置 currentTaskId；桌面端 Rust 编排同样异步。
+   * 因此 dispatch 刚返回时 getTask() 可能还是「上一个任务」或空。若直接取，
+   * 会把本轮任务当成孤儿任务（taskHistory 映射缺失），buildTurns 就多渲染一个
+   * 「空问题 + 全部实时卡片」的重复轮次（追加问答发送两轮的根因）。
+   * 这里轮询 getTask() 直到任务切换到本次新建的任务（id 与 dispatch 前不同）或超时。
    */
-  async function syncAfterDispatch(kind: 'ask' | 'followup'): Promise<void> {
+  async function syncAfterDispatch(
+    kind: 'ask' | 'followup',
+    beforeTaskId?: string,
+  ): Promise<void> {
     const platform = getPlatform();
-    const { task } = await platform.ask.getTask();
+
+    let task: AskTask | null = null;
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const { task: t } = await platform.ask.getTask();
+      if (t && t.id !== beforeTaskId) {
+        task = t;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!task) {
+      const { task: t } = await platform.ask.getTask();
+      task = t;
+    }
     if (!task) return;
 
     const convId = task.conversationId;
@@ -241,29 +265,35 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
       if (!t || sending || selected.length === 0) return;
       set({ sending: true });
       try {
+        // dispatch 前记录当前任务 id，dispatch 后据此识别「本次新建的任务」
+        const before = (await getPlatform().ask.getTask()).task;
         await getPlatform().ask.ask(
           t,
           selected,
           attachments?.length ? attachments : undefined,
         );
-        await syncAfterDispatch('ask');
+        await syncAfterDispatch('ask', before?.id);
       } finally {
         set({ sending: false });
       }
     },
 
     followUp: async (text, attachments) => {
-      const { selected, sending } = get();
+      const { selected, sending, activeConvId } = get();
       const t = text.trim();
       if (!t || sending || selected.length === 0) return;
       set({ sending: true });
       try {
+        const before = (await getPlatform().ask.getTask()).task;
+        // 把当前激活会话 id 传给后台/后端，追问稳定复用同一会话，
+        // 避免 service worker 休眠重启后追问被当成新话题
         await getPlatform().ask.followUp(
           t,
           selected,
           attachments?.length ? attachments : undefined,
+          activeConvId ?? undefined,
         );
-        await syncAfterDispatch('followup');
+        await syncAfterDispatch('followup', before?.id);
       } finally {
         set({ sending: false });
       }

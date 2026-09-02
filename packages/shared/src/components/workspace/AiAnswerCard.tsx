@@ -13,6 +13,7 @@ import type { AiStatus } from '../../utils/task';
 import { isFallbackNotice } from '../../utils/history';
 import { getPlatform } from '../../lib/platform';
 import AiIcon from './AiIcon';
+import Markdown from './Markdown';
 import Tooltip from '../ui/tooltip';
 
 const STATUS_MAP: Record<AiStatus, { text: string; cls: string }> = {
@@ -70,8 +71,6 @@ export default function AiAnswerCard({
 
   const lines = text.split('\n').length;
   const needCollapse = lines > COLLAPSE_LINES || text.length > 480;
-  const bodyCls =
-    !expanded && needCollapse ? 'line-clamp-[8] overflow-hidden' : '';
 
   return (
     // h-full：田字格同行卡片以最高者为准等高占满（外层 wrapper 已随 grid 行高拉伸）
@@ -133,13 +132,12 @@ export default function AiAnswerCard({
           </div>
         ) : text ? (
           <div className="flex h-full flex-col">
-            {/* 文本区：占满剩余空间，让底部操作固定贴底 */}
+            {/* 文本区：Markdown 渲染贴近 AI 原站点；占满剩余空间，让底部操作固定贴底 */}
             <div className="min-h-0 flex-1">
-              <p
-                className={`whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/90 ${bodyCls}`}
-              >
-                {text}
-              </p>
+              <Markdown
+                text={text}
+                clamped={!expanded && needCollapse}
+              />
             </div>
             {/* 底部固定操作：展开全文 / 内容截断提示（卡片等高拉伸时贴底） */}
             {(needCollapse || truncated) && (
