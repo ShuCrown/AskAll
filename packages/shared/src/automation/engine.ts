@@ -1510,7 +1510,15 @@ export async function runAutomation(
 
       const check = () => {
         if (Date.now() - startedAt > timeout) {
-          // 终态由引擎在观察步骤全部策略失败后统一上报，避免策略接力时重复发
+          // 超时但已捕获过内容：补发完成信号，避免面板一直停在「回复中」。
+          // 此前 AI_REPLY 已持续回传文本，这里只补最后一个 DONE。
+          if (lastText) {
+            send({
+              type: 'AI_REPLY_DONE',
+              text: lastText,
+              url: location.href,
+            });
+          }
           finish(!!lastText);
           return;
         }
@@ -1611,7 +1619,14 @@ export async function runAutomation(
 
       const check = () => {
         if (Date.now() - startedAt > timeout) {
-          // 没等到新内容：判定失败，交由后续策略 / 引擎统一上报终态
+          // 超时但已捕获到新内容（相对基线）：补发完成信号，避免面板停在「回复中」
+          if (sawNew && lastText) {
+            send({
+              type: 'AI_REPLY_DONE',
+              text: lastText,
+              url: location.href,
+            });
+          }
           finish(sawNew);
           return;
         }
@@ -1669,7 +1684,14 @@ export async function runAutomation(
           timer();
           unregisterPing(check);
           detachWake();
-          // 终态由引擎在观察步骤全部策略失败后统一上报，避免策略接力时重复发
+          // 超时但已捕获过内容：补发完成信号，避免面板一直停在「回复中」
+          if (lastText) {
+            send({
+              type: 'AI_REPLY_DONE',
+              text: lastText,
+              url: location.href,
+            });
+          }
           resolve(!!lastText);
           return;
         }

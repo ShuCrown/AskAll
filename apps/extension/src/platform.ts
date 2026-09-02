@@ -108,6 +108,11 @@ export const extensionPlatform: PlatformApi = {
       browser.runtime
         .sendMessage({ type: 'OPEN_AI_TAB', url })
         .then(() => undefined),
+    // 手动同步：请求 background 向该 AI 标签页注入探测，回传最新回答状态
+    syncAi: (aiId, aiName, taskId) =>
+      browser.runtime
+        .sendMessage({ type: 'SYNC_AI', aiId, aiName, taskId })
+        .then(() => undefined),
     onReply: (handler) => {
       const listener = (msg: unknown) => {
         if (!msg || typeof msg !== 'object') return;

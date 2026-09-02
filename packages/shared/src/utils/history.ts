@@ -42,7 +42,14 @@ export interface HistoryItem {
 }
 
 const HISTORY_KEY = 'local:history';
-const MAX_ITEMS = 100;
+/**
+ * 历史条目兜底上限：索引瘦身后单条体积极小（仅问题 + 各 AI 会话 path），
+ * 可容纳数千条；近期会话才携带回答快照（见 SNAPSHOT_KEEP）。
+ * 扩展端申请了 unlimitedStorage 无配额；桌面端 localStorage ~5MB 也在安全范围内。
+ */
+const MAX_ITEMS = 2000;
+/** 回答快照（回答内容）仅保留最近 N 条历史条目，更早的仅保留话题 + path */
+const SNAPSHOT_KEEP = 50;
 
 /** 单条回答快照的最大存储长度，防止 localStorage 超限 */
 export const ANSWER_MAX_LEN = 2000;
@@ -85,6 +92,11 @@ export async function addHistory(
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
   };
   history.unshift(newItem);
+  // 瘦身：超出快照窗口的旧条目清除回答内容，仅保留话题 + path（支撑大量历史）
+  for (let i = SNAPSHOT_KEEP; i < history.length; i++) {
+    const h = history[i];
+    if (h && h.answers && h.answers.length) delete h.answers;
+  }
   if (history.length > MAX_ITEMS) history.length = MAX_ITEMS;
   await getPlatform().storage.setItem(HISTORY_KEY, history);
   return newItem;
@@ -106,8 +118,11 @@ export async function mergeAnswer(
   text: string,
 ): Promise<void> {
   const history = await getHistory();
-  const item = history.find((h) => h.id === historyId);
+  const idx = history.findIndex((h) => h.id === historyId);
+  const item = idx >= 0 ? history[idx] : undefined;
   if (!item) return;
+  // 超出快照保留窗口的旧会话不再写回答内容（仅保留话题 + path）
+  if (idx >= SNAPSHOT_KEEP) return;
   if (!item.answers) item.answers = [];
   const fallback = isFallbackNotice(text);
   let snap = item.answers.find(

@@ -8,7 +8,7 @@
  * 常驻操作：打开源会话 ↗。
  */
 import { useState } from 'react';
-import { ExternalLink, Loader2 } from 'lucide-react';
+import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import type { AiStatus } from '../../utils/task';
 import { isFallbackNotice } from '../../utils/history';
 import { getPlatform } from '../../lib/platform';
@@ -33,6 +33,7 @@ export default function AiAnswerCard({
   text,
   url,
   truncated,
+  taskId,
 }: {
   aiId?: string;
   name: string;
@@ -40,8 +41,11 @@ export default function AiAnswerCard({
   text: string;
   url?: string;
   truncated?: boolean;
+  /** 实时任务 id：提供时才显示「同步」按钮（历史快照卡片不传） */
+  taskId?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const fallback = isFallbackNotice(text);
   const badge = STATUS_MAP[status] ?? STATUS_MAP.opening;
 
@@ -51,6 +55,17 @@ export default function AiAnswerCard({
     getPlatform()
       .ask.openAiTab(url, aiId, name)
       .catch(() => {});
+  };
+
+  // 手动同步：注入探针重新读取该 AI 标签页的当前回答（仅进行中的实时卡片显示）
+  const inProgress = status !== 'done' && status !== 'error';
+  const sync = () => {
+    if (!taskId || !aiId || syncing) return;
+    setSyncing(true);
+    getPlatform()
+      .ask.syncAi?.(aiId, name, taskId)
+      .catch(() => {})
+      .finally(() => setSyncing(false));
   };
 
   const lines = text.split('\n').length;
@@ -70,6 +85,20 @@ export default function AiAnswerCard({
           <span className={`rounded px-1.5 py-0.5 text-[10px] ${badge.cls}`}>
             {fallback ? '需手动发送' : badge.text}
           </span>
+          {inProgress && taskId && (
+            <Tooltip content={syncing ? '同步中…' : '同步该 AI 回答'}>
+              <button
+                type="button"
+                onClick={sync}
+                disabled={syncing}
+                className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`}
+                />
+              </button>
+            </Tooltip>
+          )}
           {url && (
             <Tooltip content="打开源会话">
               <button

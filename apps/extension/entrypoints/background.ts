@@ -57,6 +57,82 @@ function attachmentMeta(attachments: AttachmentPayload[]) {
   return attachments.map(({ name, mime, size }) => ({ name, mime, size }));
 }
 
+/**
+ * 手动同步探针：注入到 AI 标签页（MAIN world）读取当前回答并回传。
+ * 自包含：不能引用模块作用域标识符。回答文本经 askall:ai-reply 事件由
+ * content 桥转发回 background（与引擎同通道）。文本稳定 1.2s 或 15s 兜底后
+ * 回传 AI_REPLY_DONE，让面板从「回复中」收敛到最终状态。
+ */
+function probeReply(
+  selectors: string[],
+  meta: { aiName: string; aiId: string; taskId: string },
+): void {
+  const sels = selectors.length
+    ? selectors
+    : ['[class*="markdown"]', '[class*="answer"]', '[class*="response"]'];
+  const send = (m: Record<string, unknown>) => {
+    try {
+      window.dispatchEvent(
+        new CustomEvent('askall:ai-reply', {
+          detail: {
+            ...m,
+            aiName: meta.aiName,
+            aiId: meta.aiId,
+            taskId: meta.taskId,
+          },
+        }),
+      );
+    } catch {
+      /* ignore */
+    }
+  };
+  const extract = (): string => {
+    for (const sel of sels) {
+      try {
+        const nodes = document.querySelectorAll(sel);
+        if (nodes.length) {
+          const t = (nodes[nodes.length - 1].textContent || '').trim();
+          if (t) return t;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return '';
+  };
+  const text = extract();
+  if (!text) return; // 没有可读回答，不干预
+  send({ type: 'AI_REPLY', text, url: location.href });
+  let lastText = text;
+  let lastChange = Date.now();
+  const startedAt = Date.now();
+  let done = false;
+  const finish = (t: string) => {
+    if (done) return;
+    done = true;
+    send({ type: 'AI_REPLY_DONE', text: t, url: location.href });
+  };
+  const check = () => {
+    const cur = extract();
+    if (cur && cur !== lastText) {
+      lastText = cur;
+      lastChange = Date.now();
+      send({ type: 'AI_REPLY', text: cur, url: location.href });
+    }
+    if (Date.now() - lastChange > 1200) {
+      finish(cur || lastText);
+      return;
+    }
+    if (Date.now() - startedAt > 15000) {
+      finish(cur || lastText);
+      return;
+    }
+    // 后台标签页 timer 会被节流到 1Hz，但总会执行；探测是一次性操作，延迟可接受
+    setTimeout(check, 800);
+  };
+  setTimeout(check, 800);
+}
+
 export default defineBackground(() => {
   // 注入扩展平台实现：history.ts 等共享工具通过 getPlatform().storage 访问
   initExtensionPlatform();
@@ -323,6 +399,15 @@ export default defineBackground(() => {
     // 查看原文：优先切换到该 AI 已打开的聊天标签页，找不到才新开
     if (msg?.type === 'OPEN_AI_TAB' && msg.url) {
       openAiTab(msg.url);
+      return;
+    }
+    // 手动同步：向该 AI 已打开的标签页注入探针，回传最新回答状态
+    if (msg?.type === 'SYNC_AI' && msg.aiId) {
+      void syncAiTab(
+        String(msg.aiId),
+        String(msg.aiName ?? ''),
+        String(msg.taskId ?? ''),
+      );
       return;
     }
   });
@@ -713,6 +798,49 @@ export default defineBackground(() => {
       await browser.tabs.create({ url, active: true });
     } catch (e) {
       console.warn('[multi-ai-ask] 打开 AI 标签页失败:', e);
+    }
+  }
+
+  /**
+   * 手动同步：向该 AI 已打开的标签页注入一次性探针（不重载、只读），
+   * 重新读取当前回答并回传 AI_REPLY / AI_REPLY_DONE，兜底引擎自动同步失效、
+   * 面板卡「回复中」的场景。
+   */
+  async function syncAiTab(aiId: string, aiName: string, taskId: string) {
+    try {
+      const { aiConfigs } = await loadContext();
+      const ai = aiConfigs.find((c) => c.id === aiId);
+      if (!ai?.url) return;
+      const origin = getOrigin(ai.url);
+      if (!origin) return;
+      // 只查询已打开的标签页，不重载（保持用户在页面的会话状态）
+      const tabs = await browser.tabs.query({ url: `${origin}/*` });
+      const target =
+        tabs.find((t) => t.id != null && t.status === 'complete') ?? tabs[0];
+      if (target?.id == null) return;
+
+      // 复用该 AI 的 Recipe 回答区选择器，找不到时探针用通用兜底
+      const recipe = resolveRecipe(
+        ai.id,
+        ai.name,
+        ai.url,
+        ai.selectors?.attachSelectors ?? [],
+      );
+      const observeStep = recipe.steps.find((s) => s.id === 'observe');
+      const selectors = (observeStep?.strategies ?? [])
+        .flatMap((s) => (s.params?.replySelectors as string[] | undefined) ?? [])
+        .filter(Boolean);
+
+      // 先补桥再注入：旧标签页可能没有 content 桥转发探针回传事件
+      void ensureReplyBridge(target.id);
+      await browser.scripting.executeScript({
+        target: { tabId: target.id },
+        world: 'MAIN',
+        func: probeReply,
+        args: [selectors, { aiName, aiId, taskId }],
+      });
+    } catch (e) {
+      console.warn(`[multi-ai-ask] 手动同步 ${aiName} 失败:`, e);
     }
   }
 

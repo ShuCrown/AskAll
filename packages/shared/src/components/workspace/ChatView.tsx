@@ -158,6 +158,7 @@ function TurnBlock({
                   text={r.answer}
                   url={r.url}
                   truncated={r.answer.length >= ANSWER_MAX_LEN}
+                  taskId={turn.taskId}
                 />
               </div>
             );

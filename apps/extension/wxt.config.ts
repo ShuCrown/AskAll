@@ -34,6 +34,8 @@ export default defineConfig({
       'scripting',
       'clipboardWrite',
       'notifications',
+      // 解除 storage.local 配额（默认 ~10MB）：历史瘦身后可容纳大量会话
+      'unlimitedStorage',
     ],
     host_permissions: [
       'https://chat.deepseek.com/*',

@@ -12,7 +12,15 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
-import { Maximize, Minimize, Minus, Search, Settings, SquarePen, X } from 'lucide-react';
+import {
+  Maximize,
+  Minimize,
+  Minus,
+  Search,
+  Settings,
+  SquarePen,
+  X,
+} from 'lucide-react';
 import { getPlatform } from '../lib/platform';
 import { useAskStore } from '../store/askStore';
 import Workspace from './workspace/Workspace';

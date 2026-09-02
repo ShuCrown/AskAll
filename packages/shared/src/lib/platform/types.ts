@@ -99,6 +99,12 @@ export interface PlatformAsk {
    */
   openExternal(url: string): Promise<void>;
   /**
+   * 手动同步某 AI 的回答状态：向该 AI 已打开的标签页注入一次性探测，
+   * 重新读取当前回答并回传（用于面板手动刷新，兜底引擎自动同步失效的场景）。
+   * 桌面端聊天页内嵌、观察由引擎直接跑，可空实现。
+   */
+  syncAi?(aiId: string, aiName: string, taskId: string): Promise<void>;
+  /**
    * 桌面端田字格布局：把各 AI 聊天页按 cells 定位到主窗口。
    * 扩展端无此能力，组件需先探测存在性。
    */
