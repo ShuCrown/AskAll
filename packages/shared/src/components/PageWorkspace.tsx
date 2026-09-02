@@ -12,11 +12,21 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
-import { Maximize, Minimize, Minus, Search, Settings, SquarePen, X } from 'lucide-react';
+import {
+  Maximize,
+  Minimize,
+  Minus,
+  Search,
+  Settings,
+  SquarePen,
+  X,
+} from 'lucide-react';
 import { getPlatform } from '../lib/platform';
 import { useAskStore } from '../store/askStore';
 import Workspace from './workspace/Workspace';
 import SearchDialog from './workspace/SearchDialog';
+import Tooltip from './ui/tooltip';
+import { PanelExpandedContext } from './panel-mode';
 
 /** 面板默认宽度：工作台需足够宽（与桌面端多聊并排一致） */
 const PANEL_WIDTH = 880;
@@ -35,7 +45,7 @@ export default function PageWorkspace({
   position,
 }: PageWorkspaceProps) {
   const [logoFailed, setLogoFailed] = useState(false);
-  // 固定态恒为 true：面板默认钉在页面上，点击面板外部不自动关闭（pin 按钮已移除）
+  // 收起到右下角小浮窗（点击浮窗恢复）
   const [minimized, setMinimized] = useState(false);
   // 最大化：铺满视口；还原时回到最大化前记录的位置与尺寸
   const [maximized, setMaximized] = useState(false);
@@ -46,7 +56,8 @@ export default function PageWorkspace({
   // 搜索历史弹窗（由标题栏「搜索」按钮触发，同 Workspace 顶部搜索）
   const [searchOpen, setSearchOpen] = useState(false);
 
-  // 将「收起」状态同步给 content script（固定恒为 true，点击面板外部不自动关闭）
+  // 将「收起」状态同步给 content script：固定恒为 true（点击面板外部不自动关闭）；
+  // 收起时通知外部（右下角小浮窗渲染于卡片外，仍由本组件持有）
   useEffect(() => {
     window.dispatchEvent(
       new CustomEvent('askall-panel-state', {
@@ -195,30 +206,29 @@ export default function PageWorkspace({
           )}
         </button>
       ) : (
-        <div
-          ref={cardRef}
-          style={
-            maximized
-              ? {
-                  ...styles.card,
-                  left: 0,
-                  top: 0,
-                  width: '100vw',
-                  height: '100vh',
-                  maxHeight: '100vh',
-                  borderRadius: 0,
-                  border: 'none',
-                }
-              : {
-                  ...styles.card,
-                  ...(docked ? { right: 16 } : { left: pos.left }),
-                  top: docked ? 56 : pos.top,
-                  width: `min(${PANEL_WIDTH}px, calc(100vw - 32px))`,
-                  height: 'min(600px, calc(100vh - 72px))',
-                  maxHeight: 'calc(100vh - 72px)',
-                }
-          }
-        >
+      <div
+        ref={cardRef}
+        style={
+          maximized
+            ? {
+                ...styles.card,
+                // 最大化：四周各留 5px 间距（保留圆角/边框/阴影）
+                left: 5,
+                top: 5,
+                width: 'calc(100vw - 10px)',
+                height: 'calc(100vh - 10px)',
+                maxHeight: 'calc(100vh - 10px)',
+              }
+            : {
+                ...styles.card,
+                ...(docked ? { right: 16 } : { left: pos.left }),
+                top: docked ? 56 : pos.top,
+                width: `min(${PANEL_WIDTH}px, calc(100vw - 32px))`,
+                height: 'min(600px, calc(100vh - 72px))',
+                maxHeight: 'calc(100vh - 72px)',
+              }
+        }
+      >
           {/* 顶部拖拽标题栏：左侧 = 品牌 + 功能操作（搜索/新话题/设置），右侧 = 窗口控制（最大化/收起/关闭） */}
           <div style={styles.header} onMouseDown={startDrag}>
             <div style={styles.headerLeft}>
@@ -237,94 +247,98 @@ export default function PageWorkspace({
                 <span>齐问</span>
               </div>
               <div style={styles.headerActions}>
-                <button
-                  type="button"
-                  style={styles.iconBtn}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSearchOpen(true);
-                  }}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  aria-label="搜索历史"
-                  title="搜索历史"
-                >
-                  <Search style={{ width: 15, height: 15 }} />
-                </button>
-                <button
-                  type="button"
-                  style={styles.iconBtn}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    useAskStore.getState().newConversation();
-                  }}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  aria-label="新话题"
-                  title="新话题"
-                >
-                  <SquarePen style={{ width: 15, height: 15 }} />
-                </button>
-                <button
-                  type="button"
-                  style={styles.iconBtn}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openSettings();
-                  }}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  aria-label="设置"
-                  title="设置"
-                >
-                  <Settings style={{ width: 14, height: 14 }} />
-                </button>
+                <Tooltip content="搜索历史">
+                  <button
+                    type="button"
+                    style={styles.iconBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSearchOpen(true);
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    aria-label="搜索历史"
+                  >
+                    <Search style={{ width: 15, height: 15 }} />
+                  </button>
+                </Tooltip>
+                <Tooltip content="新话题">
+                  <button
+                    type="button"
+                    style={styles.iconBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      useAskStore.getState().newConversation();
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    aria-label="新话题"
+                  >
+                    <SquarePen style={{ width: 15, height: 15 }} />
+                  </button>
+                </Tooltip>
+                <Tooltip content="设置">
+                  <button
+                    type="button"
+                    style={styles.iconBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openSettings();
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    aria-label="设置"
+                  >
+                    <Settings style={{ width: 14, height: 14 }} />
+                  </button>
+                </Tooltip>
               </div>
             </div>
             <div style={styles.headerActions}>
-              <button
-                type="button"
-                style={styles.iconBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleMaximize();
-                }}
-                onMouseDown={(e) => e.stopPropagation()}
-                aria-label={maximized ? '还原面板' : '最大化面板'}
-                title={maximized ? '还原面板' : '最大化面板'}
-              >
-                {maximized ? (
-                  <Minimize style={{ width: 14, height: 14 }} />
-                ) : (
-                  <Maximize style={{ width: 14, height: 14 }} />
-                )}
-              </button>
-              <button
-                type="button"
-                style={styles.iconBtn}
-                onClick={() => {
-                  setMinimized(true);
-                  // 收起时退出最大化，还原小浮窗后回到常规宽高
-                  setMaximized(false);
-                }}
-                aria-label="收起到右下角"
-                title="收起到右下角小浮窗"
-              >
-                <Minus style={{ width: 16, height: 16 }} />
-              </button>
-              <button
-                type="button"
-                style={styles.iconBtn}
-                onClick={onClose}
-                aria-label="关闭"
-                title="关闭"
-              >
-                <X style={{ width: 16, height: 16 }} />
-              </button>
+              <Tooltip content={maximized ? '还原面板' : '最大化面板'}>
+                <button
+                  type="button"
+                  style={styles.iconBtn}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleMaximize();
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  aria-label={maximized ? '还原面板' : '最大化面板'}
+                >
+                  {maximized ? (
+                    <Minimize style={{ width: 14, height: 14 }} />
+                  ) : (
+                    <Maximize style={{ width: 14, height: 14 }} />
+                  )}
+                </button>
+              </Tooltip>
+              <Tooltip content="收起隐藏">
+                <button
+                  type="button"
+                  style={styles.iconBtn}
+                  onClick={() => setMinimized(true)}
+                  aria-label="收起隐藏"
+                >
+                  <Minus style={{ width: 16, height: 16 }} />
+                </button>
+              </Tooltip>
+              <Tooltip content="关闭">
+                <button
+                  type="button"
+                  style={styles.iconBtn}
+                  onClick={onClose}
+                  aria-label="关闭"
+                >
+                  <X style={{ width: 16, height: 16 }} />
+                </button>
+              </Tooltip>
             </div>
           </div>
 
           {/* 主体：共享工作台（搜索/新话题/设置已上移到标题栏，此处仅保留时间线 + Composer） */}
-          <div style={styles.body}>
-            <Workspace hideTopActions />
-          </div>
+          <PanelExpandedContext.Provider value={maximized}>
+            <div style={styles.body}>
+              <Workspace hideTopActions />
+            </div>
+          </PanelExpandedContext.Provider>
 
           {/* 搜索历史弹窗：与标题栏「搜索」按钮联动（置于卡片内，与 Workspace 内渲染同堆叠上下文） */}
           {searchOpen && (

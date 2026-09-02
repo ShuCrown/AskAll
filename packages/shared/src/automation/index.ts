@@ -15,11 +15,13 @@ export type {
   LocateParams,
   SubmitParams,
   ObserveParams,
+  AttachParams,
   StepDef,
   Recipe,
   RunMeta,
   StepReport,
   DomSnapshot,
+  AttachmentPayload,
 } from './types';
 export { runAutomation } from './engine';
 export {

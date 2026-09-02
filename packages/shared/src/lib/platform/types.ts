@@ -9,6 +9,7 @@
  *
  * 设计原则：接口尽量贴合现有 UI 已有的调用形态，避免大改 UI 逻辑。
  */
+import type { AttachmentPayload } from '../../automation/types';
 import type { AskTask } from '../../utils/task';
 
 /** 各 AI 回复进度消息（与扩展 background.ts 的运行时消息一一对应）。 */
@@ -76,12 +77,14 @@ export interface PlatformAsk {
   /**
    * 一次性提问：新建任务（新会话），并行打开各 AI 标签页/聊天页并发送。
    * 立即返回；各 AI 的回复进度通过 onReply 推送。
+   * `attachments` 可选：随问题一并发送的附件（仅扩展端 v1；桌面端忽略）。
    */
-  ask(text: string, aiIds?: string[]): Promise<void>;
+  ask(text: string, aiIds?: string[], attachments?: AttachmentPayload[]): Promise<void>;
   /**
    * 追问：延续当前会话（复用已打开的聊天页），生成新任务。
+   * `attachments` 语义同 ask。
    */
-  followUp(text: string, aiIds?: string[]): Promise<void>;
+  followUp(text: string, aiIds?: string[], attachments?: AttachmentPayload[]): Promise<void>;
   /** 获取当前任务（含各 AI 结果）。 */
   getTask(): Promise<{ task: AskTask | null }>;
   /**
@@ -95,6 +98,12 @@ export interface PlatformAsk {
    * 桌面端走系统默认浏览器；扩展端新开浏览器标签页。
    */
   openExternal(url: string): Promise<void>;
+  /**
+   * 手动同步某 AI 的回答状态：向该 AI 已打开的标签页注入一次性探测，
+   * 重新读取当前回答并回传（用于面板手动刷新，兜底引擎自动同步失效的场景）。
+   * 桌面端聊天页内嵌、观察由引擎直接跑，可空实现。
+   */
+  syncAi?(aiId: string, aiName: string, taskId: string): Promise<void>;
   /**
    * 桌面端田字格布局：把各 AI 聊天页按 cells 定位到主窗口。
    * 扩展端无此能力，组件需先探测存在性。

@@ -34,6 +34,8 @@ export default defineConfig({
       'scripting',
       'clipboardWrite',
       'notifications',
+      // 解除 storage.local 配额（默认 ~10MB）：历史瘦身后可容纳大量会话
+      'unlimitedStorage',
     ],
     host_permissions: [
       'https://chat.deepseek.com/*',
@@ -43,6 +45,7 @@ export default defineConfig({
       'https://yiyan.baidu.com/*',
       'https://www.qianwen.com/*',
       'https://tongyi.aliyun.com/*',
+      'https://yuanbao.tencent.com/*',
       // 新增 AI 网站时，需在此追加对应的 host 权限（executeScript 注入需要）
     ],
     action: {

@@ -15,6 +15,7 @@ export function genericSteps(
   inputSelectors: string[] = [],
   sendSelectors: string[] = [],
   replySelectors: string[] = [],
+  attachSelectors: string[] = [],
 ): StepDef[] {
   return [
     {
@@ -39,10 +40,26 @@ export function genericSteps(
       ],
     },
     {
-      id: 'submit',
-      // 三个按钮策略内部各自轮询等待渲染（8~10s），键盘策略另需 5s 左右，
-      // 步骤预算要覆盖全部策略走完一遍的最坏情况
+      id: 'attach',
+      // 覆盖最坏情况：paste 4s + trigger 3×(3.5s 轮询+5s 反馈)
+      // + file-input 多候选×5s + drop 6s
       timeoutMs: 60_000,
+      strategies: [
+        // 配置了上传入口选择器的站点，优先走最确定性的 file-input 通道
+        ...(attachSelectors.length
+          ? [{ kind: 'attach:file-input', params: { attachSelectors } }]
+          : []),
+        { kind: 'attach:paste' },
+        { kind: 'attach:trigger-file-input' },
+        { kind: 'attach:file-input' },
+        { kind: 'attach:drop' },
+      ],
+    },
+    {
+      id: 'submit',
+      // 按钮策略内部轮询等待渲染/解禁（flip/proximate 各 20s、selector 45s，
+      // 附件上传/解析期间发送按钮禁用可达几十秒），键盘策略另需 ~10s
+      timeoutMs: 90_000,
       strategies: [
         { kind: 'submit:enter' },
         { kind: 'submit:enabled-flip' },
@@ -117,7 +134,7 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'doubao',
     name: '豆包',
-    version: 3,
+    version: 5,
     url: 'https://www.doubao.com/chat/',
     steps: reorderSubmitSelectorFirst(
       genericSteps(
@@ -145,7 +162,7 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'wenxin',
     name: '文心一言',
-    version: 1,
+    version: 2,
     url: 'https://wenxin.baidu.com/',
     steps: genericSteps(
       [
@@ -167,7 +184,7 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'qwen',
     name: '通义千问',
-    version: 1,
+    version: 2,
     url: 'https://www.qianwen.com/',
     steps: genericSteps(
       [
@@ -178,6 +195,21 @@ export const DEFAULT_RECIPES: Recipe[] = [
       ],
       ['button[aria-label="发送消息"]', 'button[aria-label*="发送"]'],
       ['[class*="markdown"]'],
+    ),
+  },
+  {
+    id: 'yuanbao',
+    name: '元宝',
+    version: 1,
+    url: 'https://yuanbao.tencent.com/',
+    steps: genericSteps(
+      ['textarea', 'div[contenteditable="true"]', 'div[role="textbox"]'],
+      [
+        'button[aria-label*="发送"]',
+        'button[aria-label*="Send"]',
+        'button[class*="send"]',
+      ],
+      ['[class*="markdown"]', '[class*="answer"]'],
     ),
   },
 ];
@@ -199,11 +231,38 @@ export function buildGenericRecipe(
   return { id: aiId, name, version: 0, url, steps: genericSteps() };
 }
 
+/**
+ * 把站点配置的上传入口选择器（attachSelectors）注入 attach 步骤：
+ * 以 selector 驱动的 attach:file-input 提到链首（最确定性通道），其余保持通用链。
+ * 内置 Recipe 的步骤是静态预构建的，无法在构建期拿到用户配置，故在此统一注入。
+ */
+function withAttachSelectors(
+  steps: StepDef[],
+  attachSelectors: string[],
+): StepDef[] {
+  if (!attachSelectors.length) return steps;
+  return steps.map((s) => {
+    if (s.id !== 'attach') return s;
+    return {
+      ...s,
+      strategies: [
+        { kind: 'attach:file-input', params: { attachSelectors } },
+        ...s.strategies.filter(
+          (x) => !(x.kind === 'attach:file-input' && x.params?.attachSelectors),
+        ),
+      ],
+    };
+  });
+}
+
 /** 取站点 Recipe：有内置用内置，否则生成通用版 */
 export function resolveRecipe(
   aiId: string,
   name: string,
   url: string,
+  attachSelectors: string[] = [],
 ): Recipe {
-  return getRecipe(aiId) ?? buildGenericRecipe(aiId, name, url);
+  const recipe = getRecipe(aiId) ?? buildGenericRecipe(aiId, name, url);
+  const steps = withAttachSelectors(recipe.steps, attachSelectors);
+  return { ...recipe, steps };
 }

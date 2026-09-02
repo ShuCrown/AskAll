@@ -197,6 +197,8 @@ export const tauriPlatform: PlatformApi = {
         console.warn('[askall-tauri] 外链打开失败:', e);
       }
     },
+    // 手动同步：桌面端聊天页内嵌、观察由引擎直接跑，无需注入探测
+    syncAi: async () => {},
     onReply: (handler) => {
       // listen 异步返回 unlisten；在等待期间若已取消，则立即释放，避免悬挂订阅。
       let unlisten: UnlistenFn | null = null;

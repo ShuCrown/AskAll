@@ -15,11 +15,123 @@ import {
   type AiResult,
   type StepReport,
   type AutomationMemory,
+  type AttachmentPayload,
 } from '@askall/shared';
 import { initExtensionPlatform } from '../src/platform';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 const MENU_ID = 'ask-multi-ai';
+
+// 附件上限（与 UI 侧 utils/attachment.ts 保持一致；background 是信任边界，需再校验）
+const PER_FILE_MAX = 5 * 1024 * 1024;
+const TOTAL_MAX = 10 * 1024 * 1024;
+const MAX_FILES = 5;
+
+/**
+ * 清洗 UI 传来的附件载荷：逐项校验结构、单文件/总量/个数上限，
+ * 超限的丢弃（不整批拒绝，尽量保留能用的部分）。
+ */
+function sanitizeAttachments(raw: unknown): AttachmentPayload[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AttachmentPayload[] = [];
+  let total = 0;
+  for (const item of raw) {
+    if (out.length >= MAX_FILES) break;
+    const a = item as Record<string, unknown>;
+    if (typeof a?.name !== 'string' || typeof a?.dataUrl !== 'string') continue;
+    const size = typeof a?.size === 'number' ? a.size : a.dataUrl.length;
+    if (size > PER_FILE_MAX || total + size > TOTAL_MAX) continue;
+    total += size;
+    out.push({
+      name: a.name,
+      mime: typeof a?.mime === 'string' ? a.mime : 'application/octet-stream',
+      size,
+      dataUrl: a.dataUrl,
+    });
+  }
+  return out;
+}
+
+/** 附件元数据（去掉文件本体，用于任务与历史存储） */
+function attachmentMeta(attachments: AttachmentPayload[]) {
+  return attachments.map(({ name, mime, size }) => ({ name, mime, size }));
+}
+
+/**
+ * 手动同步探针：注入到 AI 标签页（MAIN world）读取当前回答并回传。
+ * 自包含：不能引用模块作用域标识符。回答文本经 askall:ai-reply 事件由
+ * content 桥转发回 background（与引擎同通道）。文本稳定 1.2s 或 15s 兜底后
+ * 回传 AI_REPLY_DONE，让面板从「回复中」收敛到最终状态。
+ */
+function probeReply(
+  selectors: string[],
+  meta: { aiName: string; aiId: string; taskId: string },
+): void {
+  const sels = selectors.length
+    ? selectors
+    : ['[class*="markdown"]', '[class*="answer"]', '[class*="response"]'];
+  const send = (m: Record<string, unknown>) => {
+    try {
+      window.dispatchEvent(
+        new CustomEvent('askall:ai-reply', {
+          detail: {
+            ...m,
+            aiName: meta.aiName,
+            aiId: meta.aiId,
+            taskId: meta.taskId,
+          },
+        }),
+      );
+    } catch {
+      /* ignore */
+    }
+  };
+  const extract = (): string => {
+    for (const sel of sels) {
+      try {
+        const nodes = document.querySelectorAll(sel);
+        if (nodes.length) {
+          const t = (nodes[nodes.length - 1].textContent || '').trim();
+          if (t) return t;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return '';
+  };
+  const text = extract();
+  if (!text) return; // 没有可读回答，不干预
+  send({ type: 'AI_REPLY', text, url: location.href });
+  let lastText = text;
+  let lastChange = Date.now();
+  const startedAt = Date.now();
+  let done = false;
+  const finish = (t: string) => {
+    if (done) return;
+    done = true;
+    send({ type: 'AI_REPLY_DONE', text: t, url: location.href });
+  };
+  const check = () => {
+    const cur = extract();
+    if (cur && cur !== lastText) {
+      lastText = cur;
+      lastChange = Date.now();
+      send({ type: 'AI_REPLY', text: cur, url: location.href });
+    }
+    if (Date.now() - lastChange > 1200) {
+      finish(cur || lastText);
+      return;
+    }
+    if (Date.now() - startedAt > 15000) {
+      finish(cur || lastText);
+      return;
+    }
+    // 后台标签页 timer 会被节流到 1Hz，但总会执行；探测是一次性操作，延迟可接受
+    setTimeout(check, 800);
+  };
+  setTimeout(check, 800);
+}
 
 export default defineBackground(() => {
   // 注入扩展平台实现：history.ts 等共享工具通过 getPlatform().storage 访问
@@ -181,11 +293,15 @@ export default defineBackground(() => {
   // 响应送达（Firefox 的 Promise 返回也不接受普通对象），必须走 sendResponse 同步回传。
   browser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'ASK_AI' && msg.text) {
-      handleAsk(msg.text, msg.aiIds);
+      handleAsk(msg.text, msg.aiIds, sanitizeAttachments(msg.attachments));
       return;
     }
     if (msg?.type === 'ASK_AI_FOLLOWUP' && msg.text) {
-      handleFollowUp(msg.text, msg.aiIds);
+      handleFollowUp(
+        msg.text,
+        msg.aiIds,
+        sanitizeAttachments(msg.attachments),
+      );
       return;
     }
     // 发送中/流式/完成：由 autoSend 经 content script 桥接转发而来。
@@ -283,6 +399,15 @@ export default defineBackground(() => {
     // 查看原文：优先切换到该 AI 已打开的聊天标签页，找不到才新开
     if (msg?.type === 'OPEN_AI_TAB' && msg.url) {
       openAiTab(msg.url);
+      return;
+    }
+    // 手动同步：向该 AI 已打开的标签页注入探针，回传最新回答状态
+    if (msg?.type === 'SYNC_AI' && msg.aiId) {
+      void syncAiTab(
+        String(msg.aiId),
+        String(msg.aiName ?? ''),
+        String(msg.taskId ?? ''),
+      );
       return;
     }
   });
@@ -395,7 +520,11 @@ export default defineBackground(() => {
   }
 
   /** 一次性提问：新建一个任务（新会话），并行打开各 AI 标签页并发送 */
-  async function handleAsk(text: string, aiIds?: string[]) {
+  async function handleAsk(
+    text: string,
+    aiIds?: string[],
+    attachments: AttachmentPayload[] = [],
+  ) {
     const { aiConfigs } = await loadContext();
     const enabledList = aiConfigs.filter((ai) => {
       if (!ai.enabled || !ai.url) return false;
@@ -421,6 +550,7 @@ export default defineBackground(() => {
       question,
       createdAt: Date.now(),
       conversationId,
+      ...(attachments.length ? { attachments: attachmentMeta(attachments) } : {}),
       results: {},
     };
     enabledList.forEach((ai) => {
@@ -445,6 +575,7 @@ export default defineBackground(() => {
       enabledList.map((ai) => ai.name),
       aiUrls,
       conversationId,
+      attachments.length ? attachmentMeta(attachments) : undefined,
     );
     // 回填历史条目 id：AI_REPLY_DONE 时据此把回答快照写入正确的历史记录
     task.historyId = historyItem.id;
@@ -456,7 +587,7 @@ export default defineBackground(() => {
         const existing = await findExistingChatTab(ai);
         if (existing) {
           trackTab(existing.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
-          injectAutomation(existing.tabId, question, ai, taskId, memory);
+          injectAutomation(existing.tabId, question, ai, taskId, memory, attachments);
           continue;
         }
       }
@@ -466,7 +597,19 @@ export default defineBackground(() => {
       const open = (tabId: number) => {
         trackTab(tabId, historyItem.id, ai.id, ai.name, url);
         if (ai.autoSend) {
-          injectAutomation(tabId, question, ai, taskId, memory);
+          injectAutomation(tabId, question, ai, taskId, memory, attachments);
+        } else if (attachments.length) {
+          // 通过 URL 打开的站点无法自动附加文件：沿用兜底提示通道，
+          // 在面板/历史中给出 error 卡片，引导用户去标签页手动上传。
+          const notice = `【AskAll · ${ai.name}】该站点通过链接打开问题，无法自动附加文件；请打开其标签页手动上传附件并发送。`;
+          updateResult(taskId, ai.id, { status: 'error', answer: notice });
+          broadcastReply({
+            type: 'AI_REPLY_DONE',
+            taskId,
+            aiId: ai.id,
+            aiName: ai.name,
+            text: notice,
+          });
         }
       };
       browser.tabs
@@ -481,7 +624,11 @@ export default defineBackground(() => {
    * 追问：延续当前会话（复用 conversationId 与已打开的聊天窗口），
    * 生成新任务（新 taskId）以区分不同轮次的结果，避免互相覆盖。
    */
-  async function handleFollowUp(text: string, aiIds?: string[]) {
+  async function handleFollowUp(
+    text: string,
+    aiIds?: string[],
+    attachments: AttachmentPayload[] = [],
+  ) {
     const { aiConfigs } = await loadContext();
     const question = text.trim();
     if (!question) return;
@@ -508,6 +655,7 @@ export default defineBackground(() => {
       question,
       createdAt: Date.now(),
       conversationId,
+      ...(attachments.length ? { attachments: attachmentMeta(attachments) } : {}),
       results: {},
     };
     targets.forEach((ai) => {
@@ -532,6 +680,7 @@ export default defineBackground(() => {
       targets.map((ai) => ai.name),
       aiUrls,
       conversationId,
+      attachments.length ? attachmentMeta(attachments) : undefined,
     );
     // 回填历史条目 id：AI_REPLY_DONE 时据此把回答快照写入正确的历史记录
     task.historyId = historyItem.id;
@@ -544,14 +693,36 @@ export default defineBackground(() => {
       if (existing) {
         reused.add(ai.id);
         trackTab(existing.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
-        injectAutomation(existing.tabId, question, ai, taskId, memory);
+        injectAutomation(existing.tabId, question, ai, taskId, memory, attachments);
       }
     }
 
-    // 没有可复用窗口的平台，回退到新建流程
+    // 没有可复用窗口的平台：在同一任务内直接新开标签页。不能回退 handleAsk——
+    // 它会新建只含这部分 AI 的任务并覆盖 currentTaskId、追加第二条历史记录，
+    // 把同一轮拆成两半（追问轮部分 AI 卡片丢失的根因）。
     const missed = targets.filter((ai) => !reused.has(ai.id));
-    if (missed.length > 0) {
-      await handleAsk(question, missed.map((ai) => ai.id));
+    for (const ai of missed) {
+      const url = buildUrl(ai, question);
+      void browser.tabs
+        .create({ url, active: false })
+        .then((tab) => {
+          if (tab.id == null) return;
+          trackTab(tab.id, historyItem.id, ai.id, ai.name, url);
+          if (ai.autoSend) {
+            injectAutomation(tab.id, question, ai, taskId, memory, attachments);
+          } else if (attachments.length) {
+            // 通过 URL 打开的站点无法自动附加文件：沿用兜底提示通道
+            const notice = `【AskAll · ${ai.name}】该站点通过链接打开问题，无法自动附加文件；请打开其标签页手动上传附件并发送。`;
+            updateResult(taskId, ai.id, { status: 'error', answer: notice });
+            broadcastReply({
+              type: 'AI_REPLY_DONE',
+              taskId,
+              aiId: ai.id,
+              aiName: ai.name,
+              text: notice,
+            });
+          }
+        });
     }
   }
 
@@ -630,6 +801,49 @@ export default defineBackground(() => {
     }
   }
 
+  /**
+   * 手动同步：向该 AI 已打开的标签页注入一次性探针（不重载、只读），
+   * 重新读取当前回答并回传 AI_REPLY / AI_REPLY_DONE，兜底引擎自动同步失效、
+   * 面板卡「回复中」的场景。
+   */
+  async function syncAiTab(aiId: string, aiName: string, taskId: string) {
+    try {
+      const { aiConfigs } = await loadContext();
+      const ai = aiConfigs.find((c) => c.id === aiId);
+      if (!ai?.url) return;
+      const origin = getOrigin(ai.url);
+      if (!origin) return;
+      // 只查询已打开的标签页，不重载（保持用户在页面的会话状态）
+      const tabs = await browser.tabs.query({ url: `${origin}/*` });
+      const target =
+        tabs.find((t) => t.id != null && t.status === 'complete') ?? tabs[0];
+      if (target?.id == null) return;
+
+      // 复用该 AI 的 Recipe 回答区选择器，找不到时探针用通用兜底
+      const recipe = resolveRecipe(
+        ai.id,
+        ai.name,
+        ai.url,
+        ai.selectors?.attachSelectors ?? [],
+      );
+      const observeStep = recipe.steps.find((s) => s.id === 'observe');
+      const selectors = (observeStep?.strategies ?? [])
+        .flatMap((s) => (s.params?.replySelectors as string[] | undefined) ?? [])
+        .filter(Boolean);
+
+      // 先补桥再注入：旧标签页可能没有 content 桥转发探针回传事件
+      void ensureReplyBridge(target.id);
+      await browser.scripting.executeScript({
+        target: { tabId: target.id },
+        world: 'MAIN',
+        func: probeReply,
+        args: [selectors, { aiName, aiId, taskId }],
+      });
+    } catch (e) {
+      console.warn(`[multi-ai-ask] 手动同步 ${aiName} 失败:`, e);
+    }
+  }
+
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   /**
@@ -696,11 +910,12 @@ export default defineBackground(() => {
     ai: AiConfig,
     taskId: string,
     memory?: AutomationMemory,
+    attachments: AttachmentPayload[] = [],
   ) {
     // 先补桥再注入：保证引擎一旦派发进度就能被转发回后台
     void ensureReplyBridge(tabId);
 
-    const base = resolveRecipe(ai.id, ai.name, ai.url);
+    const base = resolveRecipe(ai.id, ai.name, ai.url, ai.selectors?.attachSelectors ?? []);
     const recipe = applyMemory(base, memory ?? (await loadMemory()));
     const meta = { aiName: ai.name, aiId: ai.id, taskId };
 
@@ -713,7 +928,8 @@ export default defineBackground(() => {
           // 只在 MAIN world 下响应合成事件，ISOLATED world 派发的 input/click 不生效
           world: 'MAIN',
           func: runAutomation,
-          args: [text, recipe, meta],
+          // 附件仅在 autoSend 站点注入；无附件传 [] 保持参数形状一致
+          args: [text, recipe, meta, attachments],
         });
         return;
       } catch (e) {

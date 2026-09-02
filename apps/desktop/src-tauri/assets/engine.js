@@ -23,7 +23,8 @@ var AskAllEngine = (() => {
   __export(engine_exports, {
     runAutomation: () => runAutomation
   });
-  async function runAutomation(text, recipe, meta) {
+  async function runAutomation(text, recipe, meta, attachments = []) {
+    const files = Array.isArray(attachments) ? attachments : [];
     const fastClock = (() => {
       const queue = [];
       let armed = false;
@@ -455,6 +456,362 @@ var AskAllEngine = (() => {
       }
       return await fillValueSetter() || await fillInsertText() || await fillPaste();
     };
+    const ATTACH_INDICATOR_SEL = [
+      "img",
+      '[class*="preview" i]',
+      '[class*="file" i]',
+      '[class*="attach" i]',
+      '[class*="upload" i]',
+      '[class*="thumb" i]',
+      '[class*="chip" i]'
+    ].join(",");
+    const fileCache = /* @__PURE__ */ new Map();
+    const fileFromPayload = (a) => {
+      const key = `${a.name}::${a.size}`;
+      const hit = fileCache.get(key);
+      if (hit) return hit;
+      try {
+        const comma = a.dataUrl.indexOf(",");
+        const b64 = comma >= 0 ? a.dataUrl.slice(comma + 1) : a.dataUrl;
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const f = new File([bytes], a.name, { type: a.mime });
+        fileCache.set(key, f);
+        return f;
+      } catch {
+        return null;
+      }
+    };
+    const filesFor = (list) => {
+      const out = [];
+      for (const a of list) {
+        const f = fileFromPayload(a);
+        if (f) out.push(f);
+      }
+      return out;
+    };
+    const buildDt = (list) => {
+      try {
+        const fs = filesFor(list);
+        if (!fs.length) return null;
+        const dt = new DataTransfer();
+        for (const f of fs) dt.items.add(f);
+        return dt;
+      } catch {
+        return null;
+      }
+    };
+    const attachZone = () => {
+      let node = ctx.input ? ctx.input.parentElement : document.body;
+      for (let i = 0; i < 4 && node && node !== document.body; i++) {
+        const r = node.getBoundingClientRect();
+        if (r.height >= 160 && r.width >= 240) break;
+        node = node.parentElement;
+      }
+      return node ?? document.body;
+    };
+    const composerRoot = () => {
+      const input = ctx.input;
+      if (!input || !input.isConnected) return null;
+      const ir = input.getBoundingClientRect();
+      let node = input.parentElement;
+      let fallback = null;
+      for (let i = 0; i < 8 && node && node !== document.body; i++) {
+        const r = node.getBoundingClientRect();
+        if (r.top < ir.top - 350) break;
+        fallback = node;
+        if (r.height >= 120 && r.width >= 200) return node;
+        node = node.parentElement;
+      }
+      return fallback;
+    };
+    const foundFileNames = (zone) => {
+      const found = /* @__PURE__ */ new Set();
+      if (!files.length) return found;
+      const input = ctx.input;
+      let nodes;
+      try {
+        nodes = zone.querySelectorAll("div, span, p, li, a, figure");
+      } catch {
+        return found;
+      }
+      const cap = Math.min(nodes.length, 800);
+      for (let i = 0; i < cap; i++) {
+        const n = nodes[i];
+        if (!n || !n.isConnected || !visible(n)) continue;
+        if (input && (n === input || input.contains(n) || n.contains(input))) {
+          continue;
+        }
+        if (n.children.length > 4) continue;
+        const raw = (n.textContent || "").trim().toLowerCase();
+        if (!raw || raw.length > 300) continue;
+        for (const f of files) {
+          const nm = (f.name || "").toLowerCase();
+          if (!nm || found.has(nm)) continue;
+          if (raw.includes(nm) || nm.length >= 12 && raw.includes(nm.slice(0, 10))) {
+            found.add(nm);
+          }
+        }
+      }
+      return found;
+    };
+    const collectAttachSignals = () => {
+      const zone = composerRoot() ?? attachZone();
+      const ir = ctx.input ? ctx.input.getBoundingClientRect() : null;
+      const els = [];
+      try {
+        zone.querySelectorAll(ATTACH_INDICATOR_SEL).forEach((n) => {
+          if (!n.isConnected || !visible(n)) return;
+          if (n.tagName === "IMG") {
+            const src = n.getAttribute("src") || "";
+            if (!/^(blob:|data:)/i.test(src)) return;
+          } else {
+            if (n.closest('button, [role="button"]') === n && !n.querySelector("img")) {
+              return;
+            }
+            if (ir) {
+              const r = n.getBoundingClientRect();
+              if (r.top > ir.top + 60 || r.bottom < ir.top - 320) return;
+            }
+          }
+          els.push(n);
+        });
+      } catch {
+      }
+      return { els, names: foundFileNames(zone) };
+    };
+    const takeAttachBaseline = () => {
+      const s = collectAttachSignals();
+      return { els: new Set(s.els), names: s.names };
+    };
+    const pendingPayloads = () => {
+      if (!files.length) return [];
+      const found = collectAttachSignals().names;
+      if (found.size === 0) return files;
+      const pend = files.filter(
+        (f) => !f.name || !found.has(f.name.toLowerCase())
+      );
+      return pend;
+    };
+    const waitForAttachFeedback = (before, waitMs) => new Promise((resolve) => {
+      const deadline = Date.now() + waitMs;
+      const timer = interval(() => {
+        if (Date.now() > deadline) {
+          timer();
+          resolve(false);
+          return;
+        }
+        const cur = collectAttachSignals();
+        const grew = Array.from(cur.names).some((n) => !before.names.has(n)) || cur.els.some((el) => !before.els.has(el));
+        if (grew) {
+          timer();
+          resolve(true);
+        }
+      }, 300);
+    });
+    const waitForUploadSettle = async (maxMs) => {
+      const busy = () => {
+        const zone = attachZone();
+        let hit = false;
+        try {
+          zone.querySelectorAll(
+            '[class*="uploading" i], [class*="loading" i], [class*="progress" i], [class*="pending" i]'
+          ).forEach((n) => {
+            if (hit || !visible(n)) return;
+            const cls = typeof n.className === "string" ? n.className : "";
+            if (/uploading|loading|pending/i.test(cls)) {
+              hit = true;
+              return;
+            }
+            if (/\d{1,3}\s*%/.test(textOf(n))) hit = true;
+          });
+        } catch {
+        }
+        return hit;
+      };
+      const start = Date.now();
+      let stable = 0;
+      while (Date.now() - start < maxMs) {
+        await sleep(500);
+        if (busy()) stable = 0;
+        else if (++stable >= 2) return;
+      }
+    };
+    const attachPaste = async (p) => {
+      const el = ctx.input;
+      if (!el) return false;
+      const pending = pendingPayloads();
+      if (!pending.length) return true;
+      const dt = buildDt(pending);
+      if (!dt) return false;
+      const before = takeAttachBaseline();
+      el.focus();
+      await sleep(60);
+      try {
+        el.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt
+          })
+        );
+      } catch {
+        return false;
+      }
+      return waitForAttachFeedback(before, Math.min(p.attachWaitMs ?? 4e3, 4e3));
+    };
+    const attachTriggerFileInput = async () => {
+      if (!ctx.input) return false;
+      const pending = pendingPayloads();
+      if (!pending.length) return true;
+      const fs = filesFor(pending);
+      if (!fs.length) return false;
+      const ir = ctx.input.getBoundingClientRect();
+      const kw = /上传|附件|附上|文件|图片|attach|upload|clip|paperclip/i;
+      const bad = /发送|send|停止|stop|语音|voice|mic|搜索|search|提问|清空/i;
+      const seen = /* @__PURE__ */ new Set();
+      const cands = [];
+      const consider = (el) => {
+        if (seen.has(el) || !boxy(el)) return;
+        seen.add(el);
+        const label = (el.getAttribute("aria-label") || "") + " " + (el.getAttribute("title") || "") + " " + (el.id || "") + " " + (typeof el.className === "string" ? el.className : "") + " " + textOf(el);
+        if (!kw.test(label) || bad.test(label)) return;
+        const r = el.getBoundingClientRect();
+        if (r.top > ir.bottom + 40 || r.bottom < ir.top - 220) return;
+        const dx = r.left + r.width / 2 - (ir.left + ir.width / 2);
+        const dy = r.top + r.height / 2 - (ir.top + ir.height / 2);
+        cands.push({ el, dist: dx * dx + dy * dy });
+      };
+      collectButtons().forEach(consider);
+      qsaSafe(
+        '[class*="upload" i], [class*="attach" i], [class*="clip" i]'
+      ).forEach(consider);
+      if (!cands.length) return false;
+      cands.sort((a, b) => a.dist - b.dist);
+      const pressEscape = () => {
+        try {
+          document.body.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Escape",
+              code: "Escape",
+              bubbles: true,
+              cancelable: true
+            })
+          );
+        } catch {
+        }
+      };
+      for (const { el: btn } of cands.slice(0, 3)) {
+        const knownInputs = /* @__PURE__ */ new Set();
+        document.querySelectorAll('input[type="file"]').forEach((i) => knownInputs.add(i));
+        const knownBtns = /* @__PURE__ */ new Set();
+        collectButtons().forEach((b) => knownBtns.add(b));
+        clickBtn(btn);
+        const deadline = Date.now() + 3500;
+        let target = null;
+        const clickedMenu = /* @__PURE__ */ new Set();
+        while (Date.now() < deadline && !target) {
+          await sleep(200);
+          for (const inp of Array.from(
+            document.querySelectorAll('input[type="file"]')
+          )) {
+            if (!knownInputs.has(inp)) {
+              target = inp;
+              break;
+            }
+          }
+          if (target) break;
+          for (const b of collectButtons()) {
+            if (knownBtns.has(b) || clickedMenu.has(b) || b === btn) continue;
+            const label = (b.getAttribute("aria-label") || "") + " " + textOf(b);
+            if (!kw.test(label) || bad.test(label)) continue;
+            clickedMenu.add(b);
+            clickBtn(b);
+            break;
+          }
+        }
+        if (target) {
+          try {
+            const before = takeAttachBaseline();
+            const dt = new DataTransfer();
+            for (const f of fs) dt.items.add(f);
+            target.files = dt.files;
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+            target.dispatchEvent(new Event("change", { bubbles: true }));
+            if (await waitForAttachFeedback(before, 5e3)) return true;
+          } catch {
+          }
+        } else {
+          pressEscape();
+          await sleep(250);
+        }
+      }
+      return false;
+    };
+    const attachFileInput = async (p) => {
+      const pending = pendingPayloads();
+      if (!pending.length) return true;
+      const fs = filesFor(pending);
+      if (!fs.length) return false;
+      const candidates = [];
+      const push = (el) => {
+        const input = el;
+        if (input.type === "file" && !candidates.includes(input)) {
+          candidates.push(input);
+        }
+      };
+      for (const sel of p.attachSelectors || []) {
+        for (const el of qsaSafe(sel)) push(el);
+      }
+      document.querySelectorAll('input[type="file"]').forEach(push);
+      if (!candidates.length) return false;
+      for (const input of candidates) {
+        try {
+          const before = takeAttachBaseline();
+          const dt = new DataTransfer();
+          for (const f of fs) dt.items.add(f);
+          input.files = dt.files;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          if (await waitForAttachFeedback(before, 5e3)) {
+            return true;
+          }
+        } catch {
+        }
+      }
+      return false;
+    };
+    const attachDrop = async (p) => {
+      const el = ctx.input ?? document.body;
+      const pending = pendingPayloads();
+      if (!pending.length) return true;
+      const dt = buildDt(pending);
+      if (!dt) return false;
+      const before = takeAttachBaseline();
+      try {
+        const init = {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: dt
+        };
+        el.dispatchEvent(new DragEvent("dragenter", init));
+        await sleep(150);
+        el.dispatchEvent(new DragEvent("dragover", init));
+        await sleep(150);
+        el.dispatchEvent(new DragEvent("dragover", init));
+        await sleep(150);
+        el.dispatchEvent(new DragEvent("drop", init));
+        el.dispatchEvent(new DragEvent("dragleave", init));
+        document.dispatchEvent(new DragEvent("dragend", init));
+      } catch {
+        return false;
+      }
+      return waitForAttachFeedback(
+        before,
+        Math.min(p.attachWaitMs ?? 5e3, 6e3)
+      );
+    };
     const clickBtn = (btn) => {
       const r = btn.getBoundingClientRect();
       const opts = {
@@ -544,7 +901,7 @@ var AskAllEngine = (() => {
     const submitSelector = async (p) => {
       const sels = p.sendSelectors || [];
       if (sels.length === 0) return false;
-      const deadline = Date.now() + 1e4;
+      const deadline = Date.now() + 45e3;
       while (Date.now() < deadline) {
         for (const sel of sels) {
           const btn = qsSafe(sel);
@@ -592,7 +949,7 @@ var AskAllEngine = (() => {
       return candidates.slice(0, 3).map((c) => c.btn);
     };
     const submitProximate = async () => {
-      const deadline = Date.now() + 1e4;
+      const deadline = Date.now() + 2e4;
       while (Date.now() < deadline) {
         const targets = findProximate();
         for (const btn of targets) {
@@ -606,7 +963,7 @@ var AskAllEngine = (() => {
     const submitEnabledFlip = async () => {
       const base = ctx.disabledBaseline;
       if (!base) return false;
-      const deadline = Date.now() + 8e3;
+      const deadline = Date.now() + 2e4;
       while (Date.now() < deadline) {
         const flipped = [];
         for (const btn of collectButtons()) {
@@ -674,11 +1031,13 @@ var AskAllEngine = (() => {
       } catch {
         return out;
       }
+      const comp = composerRoot();
       const cap = Math.min(nodes.length, 3e3);
       for (let i = 0; i < cap; i++) {
         const el = nodes[i];
         if (!el || !boxy(el)) continue;
         if (ctx.input && (el === ctx.input || el.contains(ctx.input))) continue;
+        if (comp && (el === comp || comp.contains(el))) continue;
         if (inSideArea(el)) continue;
         const len = (el.textContent || "").length;
         if (len > 0) out.push({ el, len });
@@ -933,6 +1292,10 @@ var AskAllEngine = (() => {
       "fill:paste": fillPaste,
       "fill:insert-text": fillInsertText,
       "fill:value-setter": fillValueSetter,
+      "attach:paste": attachPaste,
+      "attach:trigger-file-input": attachTriggerFileInput,
+      "attach:file-input": attachFileInput,
+      "attach:drop": attachDrop,
       "submit:enter": submitEnter,
       "submit:enabled-flip": submitEnabledFlip,
       "submit:proximate": submitProximate,
@@ -1006,6 +1369,7 @@ var AskAllEngine = (() => {
     });
     send({ type: "AI_SENDING" });
     for (const step of recipe.steps) {
+      if (step.id === "attach" && files.length === 0) continue;
       const stepTimeout = step.timeoutMs ?? 15e3;
       const stepStart = Date.now();
       let ok = false;
@@ -1050,6 +1414,13 @@ var AskAllEngine = (() => {
       if (ok && step.id === "fill") {
         ctx.pageTextBaseline = contentTextLen();
       }
+      if (ok && step.id === "attach") {
+        ctx.input?.focus?.();
+        await waitForUploadSettle(15e3);
+        await sleep(1500);
+        ctx.blockBaseline = snapshotBlocks();
+        ctx.pageTextBaseline = contentTextLen();
+      }
       if (ok && step.id === "submit") {
         await settle(4e3);
         ctx.blockBaseline = snapshotBlocks();
@@ -1065,7 +1436,7 @@ var AskAllEngine = (() => {
         } else if (step.optional) {
           continue;
         } else {
-          const stepName = step.id === "locate" ? "\u5B9A\u4F4D\u8F93\u5165\u6846" : step.id === "fill" ? "\u5199\u5165\u95EE\u9898" : "\u81EA\u52A8\u53D1\u9001";
+          const stepName = step.id === "locate" ? "\u5B9A\u4F4D\u8F93\u5165\u6846" : step.id === "fill" ? "\u5199\u5165\u95EE\u9898" : step.id === "attach" ? "\u9644\u52A0\u6587\u4EF6" : "\u81EA\u52A8\u53D1\u9001";
           const tried = step.strategies.map((s) => s.kind).join("\u3001");
           const snap = snapshotDom();
           const reason = `\u3010AskAll \xB7 ${recipe.name}\u3011${stepName}\u5931\u8D25\uFF08\u5DF2\u8BD5\uFF1A${tried}\uFF09\uFF0C\u8BF7\u5728\u5E73\u53F0\u624B\u52A8\u53D1\u9001${snapshotBrief(snap)}`;

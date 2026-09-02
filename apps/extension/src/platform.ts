@@ -76,14 +76,24 @@ export const extensionPlatform: PlatformApi = {
   },
 
   ask: {
-    // 转发到 background 的 onMessage 处理器
-    ask: (text, aiIds) =>
+    // 转发到 background 的 onMessage 处理器（附件非空才携带，减少消息体积）
+    ask: (text, aiIds, attachments) =>
       browser.runtime
-        .sendMessage({ type: 'ASK_AI', text, aiIds })
+        .sendMessage({
+          type: 'ASK_AI',
+          text,
+          aiIds,
+          ...(attachments?.length ? { attachments } : {}),
+        })
         .then(() => undefined),
-    followUp: (text, aiIds) =>
+    followUp: (text, aiIds, attachments) =>
       browser.runtime
-        .sendMessage({ type: 'ASK_AI_FOLLOWUP', text, aiIds })
+        .sendMessage({
+          type: 'ASK_AI_FOLLOWUP',
+          text,
+          aiIds,
+          ...(attachments?.length ? { attachments } : {}),
+        })
         .then(() => undefined),
     getTask: async () => {
       const res = await browser.runtime.sendMessage({ type: 'GET_TASK' });
@@ -97,6 +107,11 @@ export const extensionPlatform: PlatformApi = {
     openExternal: (url) =>
       browser.runtime
         .sendMessage({ type: 'OPEN_AI_TAB', url })
+        .then(() => undefined),
+    // 手动同步：请求 background 向该 AI 标签页注入探测，回传最新回答状态
+    syncAi: (aiId, aiName, taskId) =>
+      browser.runtime
+        .sendMessage({ type: 'SYNC_AI', aiId, aiName, taskId })
         .then(() => undefined),
     onReply: (handler) => {
       const listener = (msg: unknown) => {

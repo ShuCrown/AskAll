@@ -12,6 +12,7 @@
  */
 import { create } from 'zustand';
 import { getPlatform, type ReplyMessage } from '../lib/platform';
+import type { AttachmentPayload } from '../automation/types';
 import {
   addHistory,
   getHistory,
@@ -29,7 +30,7 @@ import {
   setLastSelectedAis,
   setPinnedConversations,
 } from '../utils/prefs';
-import type { AiResult, AskTask } from '../utils/task';
+import type { AiResult, AskTask, AttachmentInfo } from '../utils/task';
 
 const AI_CONFIGS_KEY = 'local:aiConfigs';
 
@@ -50,6 +51,8 @@ export interface TurnView {
   taskId?: string;
   /** 该轮是否仍有 AI 未完成 */
   live: boolean;
+  /** 本次提问携带的附件元数据（历史侧或实时侧） */
+  attachments?: AttachmentInfo[];
   /** 各 AI 的会话链接（历史侧） */
   aiUrls: { id?: string; name: string; url: string }[];
   /** 历史侧已落盘的回答快照 */
@@ -81,8 +84,8 @@ export interface AskStoreState {
   hydrate: () => Promise<void>;
   refreshHistory: () => Promise<void>;
   refreshConfigs: () => Promise<void>;
-  ask: (text: string) => Promise<void>;
-  followUp: (text: string) => Promise<void>;
+  ask: (text: string, attachments?: AttachmentPayload[]) => Promise<void>;
+  followUp: (text: string, attachments?: AttachmentPayload[]) => Promise<void>;
   applyReply: (msg: ReplyMessage) => void;
   openConversation: (key: string) => void;
   newConversation: () => void;
@@ -232,26 +235,34 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
       });
     },
 
-    ask: async (text) => {
+    ask: async (text, attachments) => {
       const { selected, sending } = get();
       const t = text.trim();
       if (!t || sending || selected.length === 0) return;
       set({ sending: true });
       try {
-        await getPlatform().ask.ask(t, selected);
+        await getPlatform().ask.ask(
+          t,
+          selected,
+          attachments?.length ? attachments : undefined,
+        );
         await syncAfterDispatch('ask');
       } finally {
         set({ sending: false });
       }
     },
 
-    followUp: async (text) => {
+    followUp: async (text, attachments) => {
       const { selected, sending } = get();
       const t = text.trim();
       if (!t || sending || selected.length === 0) return;
       set({ sending: true });
       try {
-        await getPlatform().ask.followUp(t, selected);
+        await getPlatform().ask.followUp(
+          t,
+          selected,
+          attachments?.length ? attachments : undefined,
+        );
         await syncAfterDispatch('followup');
       } finally {
         set({ sending: false });
@@ -375,6 +386,7 @@ export function buildTurns(
     live: false,
     aiUrls: h.aiUrls ?? [],
     answers: h.answers,
+    attachments: h.attachments,
   }));
 
   // 关联实时任务：taskId -> historyId 映射；或会话内尚未落盘的实时任务
@@ -409,6 +421,7 @@ export function buildTurns(
         url: r.url ?? '',
       })),
       liveResults: task.results,
+      attachments: task.attachments,
     });
   }
 

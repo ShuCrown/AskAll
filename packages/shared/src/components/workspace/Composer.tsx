@@ -12,9 +12,26 @@
  * 支持受控/非受控两种文本模式，便于空态页与时间线底部复用。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Check, ChevronDown, Loader2, Send } from 'lucide-react';
+import {
+  Bot,
+  Check,
+  ChevronDown,
+  FileText,
+  Image as ImageIcon,
+  Loader2,
+  Paperclip,
+  Send,
+  X,
+} from 'lucide-react';
 import { useAskStore } from '../../store/askStore';
 import { cn } from '../../lib/utils';
+import type { AttachmentPayload } from '../../automation/types';
+import {
+  ACCEPT,
+  formatSize,
+  readFileAsPayload,
+  validateFiles,
+} from '../../utils/attachment';
 import { Button } from '../ui/button';
 import AiIcon from './AiIcon';
 
@@ -27,7 +44,7 @@ export default function Composer({
 }: {
   placeholder?: string;
   /** 提交回调；缺省时按是否有激活会话自动走 ask / followUp */
-  onSubmit?: (text: string) => void;
+  onSubmit?: (text: string, attachments?: AttachmentPayload[]) => void;
   /** 受控文本（可选） */
   value?: string;
   onValueChange?: (v: string) => void;
@@ -51,13 +68,20 @@ export default function Composer({
     else setInner(v);
   };
 
-  // AI 选择下拉：点击展开（Select 形态），Esc / 点击外部关闭
+  // AI 选择下拉：点击展开（Select 形态），Esc / 点击外部（失焦）关闭
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!pickerOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (!pickerRef.current?.contains(e.target as Node)) setPickerOpen(false);
+      // 面板在 shadow DOM 里，document 层监听的 e.target 会被事件重定向为
+      // 宿主元素，contains 判断永远 false——点击下拉内部的行也会被当成
+      // 「点击外部」而关闭，多选/取消选中被打断。用 composedPath 取含
+      // shadow 内实际元素的完整路径判断：点击行内不关闭，点击外部才关闭。
+      const path = e.composedPath();
+      if (!path.includes(pickerRef.current as unknown as EventTarget)) {
+        setPickerOpen(false);
+      }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setPickerOpen(false);
@@ -81,9 +105,38 @@ export default function Composer({
     const t = (raw ?? text).trim();
     if (!t || sending || selected.length === 0) return;
     setText('');
-    if (onSubmit) onSubmit(t);
-    else if (activeConvId) void followUp(t);
-    else void ask(t);
+    const files = attachments;
+    setAttachments([]);
+    setAttachError(null);
+    if (onSubmit) onSubmit(t, files);
+    else if (activeConvId) void followUp(t, files);
+    else void ask(t, files);
+  };
+
+  // ---------- 附件 ----------
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<AttachmentPayload[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+
+  const addFiles = async (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    const incoming = Array.from(list);
+    const err = validateFiles(incoming, attachments);
+    if (err) {
+      setAttachError(err);
+      return;
+    }
+    try {
+      const payloads = await Promise.all(incoming.map(readFileAsPayload));
+      setAttachments((prev) => [...prev, ...payloads]);
+      setAttachError(null);
+    } catch (e) {
+      setAttachError(e instanceof Error ? e.message : '读取附件失败');
+    }
+  };
+
+  const removeAttachment = (idx: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const selectedAis = useMemo(
@@ -102,6 +155,42 @@ export default function Composer({
 
   return (
     <div className="flex flex-col rounded-lg border bg-card shadow-sm">
+      {/* 附件 chips：textarea 与操作条之间，仅在有附件时渲染 */}
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 px-3 pt-2">
+          {attachments.map((a, idx) => (
+            <span
+              key={`${a.name}-${idx}`}
+              className="flex max-w-[220px] items-center gap-1 rounded-md border bg-muted/50 px-1.5 py-0.5 text-[11px] text-foreground/80"
+              title={`${a.name}（${formatSize(a.size)}）`}
+            >
+              {a.mime.startsWith('image/') ? (
+                <ImageIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+              ) : (
+                <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+              )}
+              <span className="truncate">{a.name}</span>
+              <span className="shrink-0 text-muted-foreground/70">
+                {formatSize(a.size)}
+              </span>
+              <button
+                type="button"
+                onClick={() => removeAttachment(idx)}
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label={`移除附件 ${a.name}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* 附件校验错误：一次性提示，修改选择后自动消除 */}
+      {attachError && (
+        <p className="px-3 pt-2 text-[11px] text-red-600">{attachError}</p>
+      )}
+
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -117,8 +206,29 @@ export default function Composer({
         }}
       />
 
-      {/* 底部操作条：AI 选择下拉 + 发送（与输入区同一外框、无分隔线） */}
+      {/* 底部操作条：附件 + AI 选择下拉 + 发送（与输入区同一外框、无分隔线） */}
       <div className="flex flex-wrap items-center gap-1.5 px-2.5 py-1.5">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept={ACCEPT}
+          className="hidden"
+          onChange={(e) => {
+            void addFiles(e.target.files);
+            // 重置 value：同一文件移除后可重新选择
+            e.target.value = '';
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          aria-label="添加附件"
+          title={`添加附件（图片 / PDF / 文档，单文件 ≤5MB，共 ≤10MB）`}
+          className="flex h-7 w-7 items-center justify-center rounded-md border border-input bg-secondary/60 text-secondary-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          <Paperclip className="h-3.5 w-3.5" />
+        </button>
         <div className="relative" ref={pickerRef}>
           <button
             type="button"
@@ -126,7 +236,7 @@ export default function Composer({
             aria-expanded={pickerOpen}
             title="选择发送给哪些 AI（可多选）"
             className={cn(
-              'flex h-7 max-w-[200px] items-center gap-1 rounded-md border px-1.5 text-xs transition-colors',
+              'flex h-7 items-center gap-1 rounded-md border px-1.5 text-xs transition-colors',
               pickerOpen
                 ? 'border-primary/50 bg-accent text-accent-foreground'
                 : 'border-input bg-secondary/60 text-secondary-foreground hover:bg-accent hover:text-accent-foreground',
@@ -135,7 +245,7 @@ export default function Composer({
             {selectedCount > 0 ? (
               <span className="flex min-w-0 items-center">
                 <span className="flex items-center -space-x-1">
-                  {selectedAis.slice(0, 3).map((a) => (
+                  {selectedAis.map((a) => (
                     <span
                       key={a.id}
                       className="rounded-full bg-background ring-1 ring-border"
@@ -144,11 +254,6 @@ export default function Composer({
                     </span>
                   ))}
                 </span>
-                {selectedCount > 3 && (
-                  <span className="ml-1 shrink-0 rounded bg-muted px-1 text-[10px] leading-4 text-muted-foreground">
-                    +{selectedCount - 3}
-                  </span>
-                )}
               </span>
             ) : (
               <span className="flex items-center gap-1 px-0.5 text-muted-foreground">
