@@ -612,14 +612,32 @@ export default defineBackground(() => {
       }
     }
 
-    // 没有可复用窗口的平台，回退到新建流程
+    // 没有可复用窗口的平台：在同一任务内直接新开标签页。不能回退 handleAsk——
+    // 它会新建只含这部分 AI 的任务并覆盖 currentTaskId、追加第二条历史记录，
+    // 把同一轮拆成两半（追问轮部分 AI 卡片丢失的根因）。
     const missed = targets.filter((ai) => !reused.has(ai.id));
-    if (missed.length > 0) {
-      await handleAsk(
-        question,
-        missed.map((ai) => ai.id),
-        attachments,
-      );
+    for (const ai of missed) {
+      const url = buildUrl(ai, question);
+      void browser.tabs
+        .create({ url, active: false })
+        .then((tab) => {
+          if (tab.id == null) return;
+          trackTab(tab.id, historyItem.id, ai.id, ai.name, url);
+          if (ai.autoSend) {
+            injectAutomation(tab.id, question, ai, taskId, memory, attachments);
+          } else if (attachments.length) {
+            // 通过 URL 打开的站点无法自动附加文件：沿用兜底提示通道
+            const notice = `【AskAll · ${ai.name}】该站点通过链接打开问题，无法自动附加文件；请打开其标签页手动上传附件并发送。`;
+            updateResult(taskId, ai.id, { status: 'error', answer: notice });
+            broadcastReply({
+              type: 'AI_REPLY_DONE',
+              taskId,
+              aiId: ai.id,
+              aiName: ai.name,
+              text: notice,
+            });
+          }
+        });
     }
   }
 

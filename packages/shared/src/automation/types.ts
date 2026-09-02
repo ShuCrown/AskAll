@@ -39,6 +39,7 @@ export type StrategyKind =
   | 'fill:value-setter'
   // 附加文件（仅当本次提问携带附件时执行）
   | 'attach:paste'
+  | 'attach:trigger-file-input'
   | 'attach:file-input'
   | 'attach:drop'
   // 提交发送

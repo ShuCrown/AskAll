@@ -41,23 +41,25 @@ export function genericSteps(
     },
     {
       id: 'attach',
-      // 覆盖最坏情况：三个策略各轮询 8s 反馈 + file-input 多候选尝试
-      timeoutMs: 40_000,
+      // 覆盖最坏情况：paste 4s + trigger 3×(3.5s 轮询+5s 反馈)
+      // + file-input 多候选×5s + drop 6s
+      timeoutMs: 60_000,
       strategies: [
         // 配置了上传入口选择器的站点，优先走最确定性的 file-input 通道
         ...(attachSelectors.length
           ? [{ kind: 'attach:file-input', params: { attachSelectors } }]
           : []),
         { kind: 'attach:paste' },
+        { kind: 'attach:trigger-file-input' },
         { kind: 'attach:file-input' },
         { kind: 'attach:drop' },
       ],
     },
     {
       id: 'submit',
-      // 三个按钮策略内部各自轮询等待渲染（8~10s），键盘策略另需 5s 左右，
-      // 步骤预算要覆盖全部策略走完一遍的最坏情况
-      timeoutMs: 60_000,
+      // 按钮策略内部轮询等待渲染/解禁（flip/proximate 各 20s、selector 45s，
+      // 附件上传/解析期间发送按钮禁用可达几十秒），键盘策略另需 ~10s
+      timeoutMs: 90_000,
       strategies: [
         { kind: 'submit:enter' },
         { kind: 'submit:enabled-flip' },
@@ -132,7 +134,7 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'doubao',
     name: '豆包',
-    version: 3,
+    version: 5,
     url: 'https://www.doubao.com/chat/',
     steps: reorderSubmitSelectorFirst(
       genericSteps(
@@ -160,7 +162,7 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'wenxin',
     name: '文心一言',
-    version: 1,
+    version: 2,
     url: 'https://wenxin.baidu.com/',
     steps: genericSteps(
       [

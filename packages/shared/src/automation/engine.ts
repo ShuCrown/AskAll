@@ -620,29 +620,39 @@ export async function runAutomation(
     '[class*="chip" i]',
   ].join(',');
 
-  /** dataUrl → File 惰性解码（整批共用，只解一次） */
-  let fileObjs: File[] | null = null;
-  const getFiles = (): File[] => {
-    if (fileObjs) return fileObjs;
-    fileObjs = [];
-    for (const a of files) {
-      try {
-        const comma = a.dataUrl.indexOf(',');
-        const b64 = comma >= 0 ? a.dataUrl.slice(comma + 1) : a.dataUrl;
-        const bin = atob(b64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        fileObjs.push(new File([bytes], a.name, { type: a.mime }));
-      } catch {
-        /* 单个坏载荷跳过，不影响其余 */
-      }
+  /** dataUrl → File 解码（按文件名缓存，同一载荷只解一次） */
+  const fileCache = new Map<string, File>();
+  const fileFromPayload = (a: AttachmentPayload): File | null => {
+    const key = `${a.name}::${a.size}`;
+    const hit = fileCache.get(key);
+    if (hit) return hit;
+    try {
+      const comma = a.dataUrl.indexOf(',');
+      const b64 = comma >= 0 ? a.dataUrl.slice(comma + 1) : a.dataUrl;
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const f = new File([bytes], a.name, { type: a.mime });
+      fileCache.set(key, f);
+      return f;
+    } catch {
+      /* 单个坏载荷跳过，不影响其余 */
+      return null;
     }
-    return fileObjs;
   };
 
-  const buildDt = (): DataTransfer | null => {
+  const filesFor = (list: AttachmentPayload[]): File[] => {
+    const out: File[] = [];
+    for (const a of list) {
+      const f = fileFromPayload(a);
+      if (f) out.push(f);
+    }
+    return out;
+  };
+
+  const buildDt = (list: AttachmentPayload[]): DataTransfer | null => {
     try {
-      const fs = getFiles();
+      const fs = filesFor(list);
       if (!fs.length) return null;
       const dt = new DataTransfer();
       for (const f of fs) dt.items.add(f);
@@ -665,42 +675,207 @@ export async function runAutomation(
     return node ?? document.body;
   };
 
-  /** 附件反馈信号签名：可见预览节点数 + 容器文本中出现的文件名个数 */
-  const attachIndicatorSig = (): string => {
-    const zone = attachZone();
-    let count = 0;
-    zone.querySelectorAll(ATTACH_INDICATOR_SEL).forEach((n) => {
-      if (visible(n)) count++;
-    });
-    const lower = (zone.textContent || '').toLowerCase();
-    let nameHits = 0;
-    for (const f of files) {
-      if (f.name && lower.includes(f.name.toLowerCase())) nameHits++;
+  /**
+   * 输入区（composer）容器：从输入框向上找最小的「足够大」容器，但一旦
+   * 爬进对话区（容器顶边远高于输入框）就停。附件 chip/上传进度都长在这里，
+   * 把它从「内容文本」度量中排除：chip 的文件名/进度百分比文本增长会被
+   * pageTextGrew 误判成「已发送」——引擎以为提交成功直接进入观察阶段，
+   * 实际什么都没发出去（千问/文心「文字附件都在却没发」的根因之一）。
+   */
+  const composerRoot = (): HTMLElement | null => {
+    const input = ctx.input;
+    if (!input || !input.isConnected) return null;
+    const ir = input.getBoundingClientRect();
+    let node: HTMLElement | null = input.parentElement;
+    let fallback: HTMLElement | null = null;
+    for (let i = 0; i < 8 && node && node !== document.body; i++) {
+      const r = node.getBoundingClientRect();
+      if (r.top < ir.top - 350) break; // 已爬进对话区，停
+      fallback = node;
+      if (r.height >= 120 && r.width >= 200) return node;
+      node = node.parentElement;
     }
-    return `${count}|${nameHits}`;
+    return fallback;
   };
 
-  /** 派发后轮询反馈信号，相对基线出现变化即成功 */
+  /**
+   * 输入区里「已附上」的附件文件名集合：逐元素扫描（排除输入框自身——
+   * 问题文本里恰好包含文件名会造成假命中），完整文件名匹配，DOM 里
+   * 被 JS 截断的长文件名按前 10 字符回退匹配。chip 类名站点各不相同，
+   * 文本匹配是不依赖类名的通用信号。
+   */
+  const foundFileNames = (zone: HTMLElement): Set<string> => {
+    const found = new Set<string>();
+    if (!files.length) return found;
+    const input = ctx.input;
+    let nodes: NodeListOf<Element>;
+    try {
+      nodes = zone.querySelectorAll('div, span, p, li, a, figure');
+    } catch {
+      return found;
+    }
+    const cap = Math.min(nodes.length, 800);
+    for (let i = 0; i < cap; i++) {
+      const n = nodes[i];
+      if (!n || !n.isConnected || !visible(n)) continue;
+      if (input && (n === input || input.contains(n) || n.contains(input))) {
+        continue;
+      }
+      if (n.children.length > 4) continue; // chip 是叶子，跳过大容器
+      const raw = (n.textContent || '').trim().toLowerCase();
+      if (!raw || raw.length > 300) continue;
+      for (const f of files) {
+        const nm = (f.name || '').toLowerCase();
+        if (!nm || found.has(nm)) continue;
+        if (
+          raw.includes(nm) ||
+          (nm.length >= 12 && raw.includes(nm.slice(0, 10)))
+        ) {
+          found.add(nm);
+        }
+      }
+    }
+    return found;
+  };
+
+  /**
+   * 附件反馈信号采集：只认「看起来像附件预览」的信号——
+   * - blob:/data: 图片（上传预览的典型形态；懒加载的远程图片是 http(s) src，不算）；
+   * - 输入区里类名带 file/attach/upload/preview/thumb/chip 的可见节点。裸的
+   *   按钮/入口不算（工具栏「上传」按钮晚挂载会被误认成附件已附上）；
+   * - 输入区里出现了附件文件名文本。
+   * 旧实现按「计数变化」判成功且区域太窄（只爬 4 层，豆包的 chip 条在更外层），
+   * 反馈全部漏判 → 每个策略都各附一次（重复同名文件）、最终还误报失败。
+   */
+  const collectAttachSignals = (): {
+    els: Element[];
+    names: Set<string>;
+  } => {
+    const zone = composerRoot() ?? attachZone();
+    const ir = ctx.input ? ctx.input.getBoundingClientRect() : null;
+    const els: Element[] = [];
+    try {
+      zone.querySelectorAll(ATTACH_INDICATOR_SEL).forEach((n) => {
+        if (!n.isConnected || !visible(n)) return;
+        if (n.tagName === 'IMG') {
+          const src = n.getAttribute('src') || '';
+          if (!/^(blob:|data:)/i.test(src)) return;
+        } else {
+          // 裸按钮不算附件反馈；chip 按钮通常带缩略图
+          if (
+            n.closest('button, [role="button"]') === n &&
+            !n.querySelector('img')
+          ) {
+            return;
+          }
+          if (ir) {
+            const r = n.getBoundingClientRect();
+            if (r.top > ir.top + 60 || r.bottom < ir.top - 320) return;
+          }
+        }
+        els.push(n);
+      });
+    } catch {
+      /* ignore */
+    }
+    return { els, names: foundFileNames(zone) };
+  };
+
+  interface AttachBaseline {
+    els: Set<Element>;
+    names: Set<string>;
+  }
+  const takeAttachBaseline = (): AttachBaseline => {
+    const s = collectAttachSignals();
+    return { els: new Set(s.els), names: s.names };
+  };
+
+  /**
+   * 幂等预检：还没附上的附件。每个 attach 策略派发前先取一次——
+   * 上一个策略可能已经把文件附上但反馈漏判（返回 false），这里能发现
+   * 「文件名已出现」就直接判定成功，避免重复附加同名文件。
+   */
+  const pendingPayloads = (): AttachmentPayload[] => {
+    if (!files.length) return [];
+    const found = collectAttachSignals().names;
+    if (found.size === 0) return files;
+    const pend = files.filter(
+      (f) => !f.name || !found.has(f.name.toLowerCase()),
+    );
+    return pend;
+  };
+
+  /**
+   * 派发后轮询反馈信号：出现「新节点」或「新文件名文本」才算附上。
+   * 比对的是元素身份（新增），不是数量变化——后者会被无关的页面渲染扰动骗过。
+   */
   const waitForAttachFeedback = (
-    before: string,
+    before: AttachBaseline,
     waitMs: number,
   ): Promise<boolean> =>
     new Promise((resolve) => {
       const deadline = Date.now() + waitMs;
       const timer = interval(() => {
-        if (Date.now() > deadline || attachIndicatorSig() !== before) {
+        if (Date.now() > deadline) {
           timer();
-          resolve(Date.now() <= deadline && attachIndicatorSig() !== before);
+          resolve(false);
+          return;
+        }
+        const cur = collectAttachSignals();
+        const grew =
+          Array.from(cur.names).some((n) => !before.names.has(n)) ||
+          cur.els.some((el) => !before.els.has(el));
+        if (grew) {
+          timer();
+          resolve(true);
         }
       }, 300);
     });
 
+  /**
+   * 等输入区的上传/解析指示消失（最多 maxMs）：附件上传/解析期间发送按钮
+   * 常被禁用，立即提交只会白白耗尽各提交策略的内部超时，表现为
+   * 「文字和附件都在输入框里却没发出去」（千问/文心的根因）。
+   */
+  const waitForUploadSettle = async (maxMs: number): Promise<void> => {
+    const busy = (): boolean => {
+      const zone = attachZone();
+      let hit = false;
+      try {
+        zone.querySelectorAll(
+          '[class*="uploading" i], [class*="loading" i], [class*="progress" i], [class*="pending" i]',
+        ).forEach((n) => {
+          if (hit || !visible(n)) return;
+          const cls = typeof n.className === 'string' ? n.className : '';
+          if (/uploading|loading|pending/i.test(cls)) {
+            hit = true;
+            return;
+          }
+          if (/\d{1,3}\s*%/.test(textOf(n))) hit = true;
+        });
+      } catch {
+        /* ignore */
+      }
+      return hit;
+    };
+    const start = Date.now();
+    let stable = 0;
+    while (Date.now() - start < maxMs) {
+      await sleep(500);
+      if (busy()) stable = 0;
+      else if (++stable >= 2) return;
+    }
+  };
+
   const attachPaste = async (p: StrategyParams): Promise<boolean> => {
     const el = ctx.input as HTMLElement | null;
     if (!el) return false;
-    const dt = buildDt();
+    // 幂等预检：文件已附上（前一策略附上但反馈漏判）就不重复派发
+    const pending = pendingPayloads();
+    if (!pending.length) return true;
+    const dt = buildDt(pending);
     if (!dt) return false;
-    const before = attachIndicatorSig();
+    const before = takeAttachBaseline();
     el.focus();
     await sleep(60);
     try {
@@ -714,14 +889,131 @@ export async function runAutomation(
     } catch {
       return false;
     }
-    // 等预览反馈确认；无反馈时返回 false 让 file-input/drop 接力尝试——
-    // paste 在部分站点（如豆包的 tiptap）不触发上传，不能只凭「派发成功」
-    // 就断定已附加。链尾的 drop 是乐观成功，保证不会因检测假阴性而整单中止。
+    // 等预览反馈确认；无反馈时返回 false 让后续策略接力尝试——
+    // paste 在部分站点（如豆包的 tiptap 对非图片文件）不触发上传，
+    // 不能只凭「派发成功」就断定已附加。
     return waitForAttachFeedback(before, Math.min(p.attachWaitMs ?? 4000, 4000));
   };
 
+  /**
+   * 点击输入框邻域的「上传/附件」入口按钮，等站点挂载出 input[type=file]
+   * 再程序化写入。许多站点（豆包等）的上传 input 只在点开入口后才渲染，
+   * 全页静态扫描找不到，必须先触发入口；有的站点入口还会先弹一层菜单，
+   * 需要再点一次菜单项（如「上传文件」）。
+   */
+  const attachTriggerFileInput = async (): Promise<boolean> => {
+    if (!ctx.input) return false;
+    // 幂等预检：文件已附上就不重复派发
+    const pending = pendingPayloads();
+    if (!pending.length) return true;
+    const fs = filesFor(pending);
+    if (!fs.length) return false;
+    const ir = ctx.input.getBoundingClientRect();
+    const kw = /上传|附件|附上|文件|图片|attach|upload|clip|paperclip/i;
+    const bad = /发送|send|停止|stop|语音|voice|mic|搜索|search|提问|清空/i;
+    const seen = new Set<Element>();
+    const cands: Array<{ el: HTMLElement; dist: number }> = [];
+    const consider = (el: HTMLElement) => {
+      if (seen.has(el) || !boxy(el)) return;
+      seen.add(el);
+      const label =
+        (el.getAttribute('aria-label') || '') +
+        ' ' +
+        (el.getAttribute('title') || '') +
+        ' ' +
+        (el.id || '') +
+        ' ' +
+        (typeof el.className === 'string' ? el.className : '') +
+        ' ' +
+        textOf(el);
+      if (!kw.test(label) || bad.test(label)) return;
+      const r = el.getBoundingClientRect();
+      // 只认输入框上方工具栏带（同行的工具按钮、紧贴输入框上方的入口）
+      if (r.top > ir.bottom + 40 || r.bottom < ir.top - 220) return;
+      const dx = r.left + r.width / 2 - (ir.left + ir.width / 2);
+      const dy = r.top + r.height / 2 - (ir.top + ir.height / 2);
+      cands.push({ el, dist: dx * dx + dy * dy });
+    };
+    collectButtons().forEach(consider);
+    qsaSafe(
+      '[class*="upload" i], [class*="attach" i], [class*="clip" i]',
+    ).forEach(consider);
+    if (!cands.length) return false;
+    cands.sort((a, b) => a.dist - b.dist);
+
+    const pressEscape = (): void => {
+      try {
+        document.body.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            code: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      } catch {
+        /* ignore */
+      }
+    };
+
+    for (const { el: btn } of cands.slice(0, 3)) {
+      const knownInputs = new Set<Element>();
+      document
+        .querySelectorAll('input[type="file"]')
+        .forEach((i) => knownInputs.add(i));
+      const knownBtns = new Set<Element>();
+      collectButtons().forEach((b) => knownBtns.add(b));
+      clickBtn(btn);
+      // 等新的 input[type=file] 挂载；若入口先弹出菜单，再点一次新出现的菜单项
+      const deadline = Date.now() + 3500;
+      let target: HTMLInputElement | null = null;
+      const clickedMenu = new Set<Element>();
+      while (Date.now() < deadline && !target) {
+        await sleep(200);
+        for (const inp of Array.from(
+          document.querySelectorAll<HTMLInputElement>('input[type="file"]'),
+        )) {
+          if (!knownInputs.has(inp)) {
+            target = inp;
+            break;
+          }
+        }
+        if (target) break;
+        for (const b of collectButtons()) {
+          if (knownBtns.has(b) || clickedMenu.has(b) || b === btn) continue;
+          const label = (b.getAttribute('aria-label') || '') + ' ' + textOf(b);
+          if (!kw.test(label) || bad.test(label)) continue;
+          clickedMenu.add(b);
+          clickBtn(b);
+          break;
+        }
+      }
+      if (target) {
+        try {
+          const before = takeAttachBaseline();
+          const dt = new DataTransfer();
+          for (const f of fs) dt.items.add(f);
+          target.files = dt.files;
+          target.dispatchEvent(new Event('input', { bubbles: true }));
+          target.dispatchEvent(new Event('change', { bubbles: true }));
+          if (await waitForAttachFeedback(before, 5000)) return true;
+        } catch {
+          /* 下一个候选 */
+        }
+      } else {
+        // 没挂出 input：关掉可能弹出的菜单/浮层再试下一个
+        pressEscape();
+        await sleep(250);
+      }
+    }
+    return false;
+  };
+
   const attachFileInput = async (p: StrategyParams): Promise<boolean> => {
-    const fs = getFiles();
+    // 幂等预检：文件已附上就不重复派发
+    const pending = pendingPayloads();
+    if (!pending.length) return true;
+    const fs = filesFor(pending);
     if (!fs.length) return false;
     const candidates: HTMLInputElement[] = [];
     const push = (el: Element) => {
@@ -736,50 +1028,61 @@ export async function runAutomation(
     }
     document.querySelectorAll('input[type="file"]').forEach(push);
     if (!candidates.length) return false;
-    const before = attachIndicatorSig();
-    // 乐观策略：只要成功写入 files 并派发 change 即视为已附加。预览反馈因站点
-    // 而异（缩略图延迟渲染 / 类名不匹配都会造成假阴性），假阴性的代价是整单
-    // 中止不发——比「发出一条缺附件的消息」更糟。有反馈则换下一个候选前确认。
-    let dispatched = false;
     for (const input of candidates) {
       try {
+        const before = takeAttachBaseline();
         const dt = new DataTransfer();
         for (const f of fs) dt.items.add(f);
         input.files = dt.files;
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
-        dispatched = true;
-        // 有反馈即确认成功；无反馈才试下一个候选 input
-        if (await waitForAttachFeedback(before, 3000)) {
+        // 必须等到真实反馈（预览/chip/文件名）才算附上：乐观放行会静默发出
+        // 一条缺附件的消息（豆包实测教训）。无反馈换下一个候选 input。
+        if (await waitForAttachFeedback(before, 5000)) {
           return true;
         }
       } catch {
         /* 下一个候选 */
       }
     }
-    return dispatched;
+    return false;
   };
 
   const attachDrop = async (p: StrategyParams): Promise<boolean> => {
     const el = (ctx.input as HTMLElement | null) ?? document.body;
-    const dt = buildDt();
+    // 幂等预检：文件已附上就不重复派发
+    const pending = pendingPayloads();
+    if (!pending.length) return true;
+    const dt = buildDt(pending);
     if (!dt) return false;
-    const before = attachIndicatorSig();
+    const before = takeAttachBaseline();
     try {
       const init: DragEventInit = {
         bubbles: true,
         cancelable: true,
         dataTransfer: dt,
       };
+      // 事件之间必须留出宏任务间隙：站点的拖放遮罩/处理器在 dragenter 后才
+      // 异步挂载（React 状态更新），同步三连发时 drop 处理器还不存在，事件
+      // 全部落空（豆包「附件丢失、只发出文字」的根因之一）
       el.dispatchEvent(new DragEvent('dragenter', init));
+      await sleep(150);
       el.dispatchEvent(new DragEvent('dragover', init));
+      await sleep(150);
+      el.dispatchEvent(new DragEvent('dragover', init));
+      await sleep(150);
       el.dispatchEvent(new DragEvent('drop', init));
+      // 清理拖拽态，避免站点拖放遮罩残留
+      el.dispatchEvent(new DragEvent('dragleave', init));
+      document.dispatchEvent(new DragEvent('dragend', init));
     } catch {
       return false;
     }
-    // 乐观成功：事件派发无异常即通过，预览反馈仅用于提前确认
-    await waitForAttachFeedback(before, Math.min(p.attachWaitMs ?? 4000, 4000));
-    return true;
+    // 与其余策略一致：必须等到真实反馈才算附上
+    return waitForAttachFeedback(
+      before,
+      Math.min(p.attachWaitMs ?? 5000, 6000),
+    );
   };
 
   // ---------- 提交策略 ----------
@@ -904,8 +1207,9 @@ export async function runAutomation(
     if (sels.length === 0) return false;
     // 轮询等待而非一次性查询：后台标签页里 React 调度被节流，按钮常比
     // 输入框晚好几秒才渲染（豆包新版尤其明显——发送按钮在输入框有内容后
-    // 才出现），一次性查询必然落空。
-    const deadline = Date.now() + 10_000;
+    // 才出现），一次性查询必然落空。携带附件时按钮还会在上传/解析期间保持
+    // 禁用（可达几十秒），预算必须覆盖这段窗口（千问/文心实测教训）。
+    const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
       for (const sel of sels) {
         const btn = qsSafe(sel);
@@ -975,8 +1279,9 @@ export async function runAutomation(
   };
 
   const submitProximate = async (): Promise<boolean> => {
-    // 轮询等待按钮渲染：后台标签页里它可能晚于输入框数秒才出现
-    const deadline = Date.now() + 10_000;
+    // 轮询等待按钮渲染：后台标签页里它可能晚于输入框数秒才出现；
+    // 附件上传/解析期间按钮禁用，同样需要长预算
+    const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       const targets = findProximate();
       for (const btn of targets) {
@@ -996,8 +1301,9 @@ export async function runAutomation(
   const submitEnabledFlip = async (): Promise<boolean> => {
     const base = ctx.disabledBaseline;
     if (!base) return false;
-    // 同样轮询等待：状态翻转需要一次 React 重渲染，后台标签页里会迟到
-    const deadline = Date.now() + 8000;
+    // 同样轮询等待：状态翻转需要一次 React 重渲染，后台标签页里会迟到；
+    // 附件上传/解析期间按钮保持禁用，需要长预算等它翻转
+    const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       const flipped: HTMLElement[] = [];
       for (const btn of collectButtons()) {
@@ -1082,11 +1388,15 @@ export async function runAutomation(
     } catch {
       return out;
     }
+    // 排除输入区（composer）块：附件 chip 的文件名/上传进度文本增长不是
+    // 「内容增长」，会把提交判定与观察基线双双带偏
+    const comp = composerRoot();
     const cap = Math.min(nodes.length, 3000);
     for (let i = 0; i < cap; i++) {
       const el = nodes[i];
       if (!el || !boxy(el)) continue;
       if (ctx.input && (el === ctx.input || el.contains(ctx.input))) continue;
+      if (comp && (el === comp || comp.contains(el))) continue;
       // 排除侧栏/导航块：左侧历史栏懒加载会伪装成「回答增长」
       if (inSideArea(el)) continue;
       const len = (el.textContent || '').length;
@@ -1401,6 +1711,7 @@ export async function runAutomation(
     'fill:insert-text': fillInsertText,
     'fill:value-setter': fillValueSetter,
     'attach:paste': attachPaste,
+    'attach:trigger-file-input': attachTriggerFileInput,
     'attach:file-input': attachFileInput,
     'attach:drop': attachDrop,
     'submit:enter': submitEnter,
@@ -1560,11 +1871,13 @@ export async function runAutomation(
     }
 
     // 附加成功后：重聚焦输入框（附件预览可能夺走焦点，submit:enter 依赖
-    // 输入框接收按键）、等站点处理完预览再重采基线（附件预览缩略图既新增
-    // DOM 块、又计入内容文本，若沿用 fill 时的基线，提交判定会把「刚附加
-    // 的预览」误判成「已发送」）。
+    // 输入框接收按键）、等站点上传/解析完成（上传中发送按钮禁用，立即提交
+    // 只会耗尽各提交策略的内部超时——千问/文心「文字附件都在却没发出去」
+    // 的根因），最后重采基线（附件预览缩略图新增 DOM 块，若沿用 fill 时的
+    // 基线，提交判定会把「刚附加的预览」误判成「已发送」）。
     if (ok && step.id === 'attach') {
       (ctx.input as HTMLElement | null)?.focus?.();
+      await waitForUploadSettle(15_000);
       await sleep(1500);
       ctx.blockBaseline = snapshotBlocks();
       ctx.pageTextBaseline = contentTextLen();

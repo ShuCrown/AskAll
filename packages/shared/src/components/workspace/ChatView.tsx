@@ -45,8 +45,32 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
     }
   };
 
+  // 卡片顺序固定按配置列表顺序（默认四家 deepseek→豆包→文心→千问，自定义在后），
+  // 不随完成先后 / 对象插入序变动
+  const configs = useAskStore((s) => s.configs);
+  const orderOf = (id?: string, name?: string): number => {
+    if (id != null) {
+      const i = configs.findIndex((c) => c.id === id);
+      if (i >= 0) return i;
+    }
+    if (name != null) {
+      const j = configs.findIndex((c) => c.name === name);
+      if (j >= 0) return j;
+    }
+    return 999;
+  };
+
   // 该轮的回答展示：实时结果 > 历史快照 > 仅链接（旧数据兼容）
-  const liveResults = turn.liveResults ? Object.values(turn.liveResults) : null;
+  const liveResults = turn.liveResults
+    ? Object.values(turn.liveResults).sort(
+        (a, b) => orderOf(a.aiId, a.aiName) - orderOf(b.aiId, b.aiName),
+      )
+    : null;
+  const answers = turn.answers
+    ? [...turn.answers].sort(
+        (a, b) => orderOf(a.aiId, a.name) - orderOf(b.aiId, b.name),
+      )
+    : null;
 
   return (
     <div className="group flex flex-col gap-2">
@@ -112,9 +136,9 @@ function TurnBlock({ turn, index }: { turn: TurnView; index: number }) {
             />
           ))}
         </div>
-      ) : turn.answers && turn.answers.length > 0 ? (
+      ) : answers && answers.length > 0 ? (
         <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
-          {turn.answers.map((snap, i) => {
+          {answers.map((snap, i) => {
             const link =
               snap.url ??
               turn.aiUrls.find(
