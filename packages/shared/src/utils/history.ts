@@ -54,11 +54,10 @@ const SNAPSHOT_KEEP = 50;
 /** 单条回答快照的最大存储长度，防止 localStorage 超限 */
 export const ANSWER_MAX_LEN = 2000;
 
-/** 截断超长回答文本（尾部附截断标记） */
+/** 截断超长回答文本（静默截断，不附截断标记，避免面板显示「内容已截断」提示） */
 export function truncateAnswer(text: string): string {
   if (!text) return '';
-  if (text.length <= ANSWER_MAX_LEN) return text;
-  return `${text.slice(0, ANSWER_MAX_LEN)}\n…[内容已截断，请在会话页查看完整回答]`;
+  return text.length <= ANSWER_MAX_LEN ? text : text.slice(0, ANSWER_MAX_LEN);
 }
 
 /**

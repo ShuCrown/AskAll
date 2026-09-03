@@ -4,11 +4,10 @@
  * 展示状态流水线（准备中 → 发送中 → 回复中 → 已完成/失败）+ 回答文本。
  * 两类特殊态：
  *   - fallback（自动发送失败）：警示样式 + 引导去源页面手动发送；
- *   - truncated（快照截断）：提示完整内容需到会话页查看。
  * 常驻操作：打开源会话 ↗。
  */
 import { useState } from 'react';
-import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
+import { ExternalLink, Loader2, RefreshCw, RotateCcw } from 'lucide-react';
 import type { AiStatus } from '../../utils/task';
 import { isFallbackNotice } from '../../utils/history';
 import { getPlatform } from '../../lib/platform';
@@ -24,29 +23,27 @@ const STATUS_MAP: Record<AiStatus, { text: string; cls: string }> = {
   error: { text: '失败', cls: 'bg-red-100 text-red-700' },
 };
 
-/** 默认折叠行数，超过则显示「展开」 */
-const COLLAPSE_LINES = 8;
-
 export default function AiAnswerCard({
   aiId,
   name,
   status,
   text,
   url,
-  truncated,
   taskId,
+  question,
 }: {
   aiId?: string;
   name: string;
   status: AiStatus;
   text: string;
   url?: string;
-  truncated?: boolean;
-  /** 实时任务 id：提供时才显示「同步」按钮（历史快照卡片不传） */
+  /** 实时任务 id：提供时才显示「同步/重试」按钮（历史快照卡片不传） */
   taskId?: string;
+  /** 本轮问题文本：重试发送时随消息传给后台重新注入（SW 重启后不依赖后台内存） */
+  question?: string;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const fallback = isFallbackNotice(text);
   const badge = STATUS_MAP[status] ?? STATUS_MAP.opening;
 
@@ -69,8 +66,20 @@ export default function AiAnswerCard({
       .finally(() => setSyncing(false));
   };
 
-  const lines = text.split('\n').length;
-  const needCollapse = lines > COLLAPSE_LINES || text.length > 480;
+  // 重试发送：卡住「发送中」/失败/需手动发送时，复用该 AI 标签页重新自动发送。
+  // 携带 question 由后台以同一 taskId 重注入引擎，卡片原地更新。
+  const canRetry =
+    taskId != null &&
+    !!aiId &&
+    (status === 'sending' || status === 'error' || fallback);
+  const retry = () => {
+    if (!canRetry || retrying) return;
+    setRetrying(true);
+    getPlatform()
+      .ask.retryAi?.(aiId!, name, taskId!, question ?? '')
+      .catch(() => {})
+      .finally(() => setRetrying(false));
+  };
 
   return (
     // h-full：田字格同行卡片以最高者为准等高占满（外层 wrapper 已随 grid 行高拉伸）；
@@ -100,6 +109,20 @@ export default function AiAnswerCard({
               </button>
             </Tooltip>
           )}
+          {canRetry && (
+            <Tooltip content={retrying ? '重试中…' : '重试发送'}>
+              <button
+                type="button"
+                onClick={retry}
+                disabled={retrying}
+                className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                <RotateCcw
+                  className={`h-3.5 w-3.5 ${retrying ? 'animate-spin' : ''}`}
+                />
+              </button>
+            </Tooltip>
+          )}
           {url && (
             <Tooltip content="打开源会话">
               <button
@@ -115,7 +138,7 @@ export default function AiAnswerCard({
       </div>
 
       {/* 正文（flex-1：填满卡片剩余高度，配合 h-full 等高；min-h-0：卡片达 max-h 时可压缩，
-          内部文本区 overflow-y-auto 承接超长内容滚动，底部操作条始终可见） */}
+          内部文本区 overflow-y-auto 承接超长内容滚动，超出卡片高度时自动出纵向滚动条） */}
       <div className="min-h-0 flex-1 px-2.5 py-2">
         {fallback ? (
           <div className="flex flex-col gap-1.5">
@@ -134,41 +157,10 @@ export default function AiAnswerCard({
           </div>
         ) : text ? (
           <div className="flex h-full flex-col">
-            {/* 文本区：Markdown 渲染贴近 AI 原站点；占满剩余空间，超长时内部滚动 */}
+            {/* 文本区：直接展示全部内容；占满剩余空间，超长时在框内纵向滚动 */}
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <Markdown
-                text={text}
-                clamped={!expanded && needCollapse}
-              />
+              <Markdown text={text} />
             </div>
-            {/* 底部固定操作：展开全文 / 内容截断提示（卡片等高拉伸时贴底） */}
-            {(needCollapse || truncated) && (
-              <div className="mt-2 flex items-center gap-3 border-t border-black/5 pt-1.5">
-                {needCollapse && (
-                  <button
-                    type="button"
-                    onClick={() => setExpanded((v) => !v)}
-                    className="text-[11px] text-primary hover:underline"
-                  >
-                    {expanded ? '收起' : '展开全文'}
-                  </button>
-                )}
-                {truncated && (
-                  <span className="text-[11px] text-muted-foreground">
-                    内容已截断
-                    {url && (
-                      <button
-                        type="button"
-                        onClick={openSource}
-                        className="ml-1 text-primary hover:underline"
-                      >
-                        查看完整回答 ↗
-                      </button>
-                    )}
-                  </span>
-                )}
-              </div>
-            )}
           </div>
         ) : status === 'done' || status === 'error' ? (
           <p className="text-xs text-muted-foreground/70">

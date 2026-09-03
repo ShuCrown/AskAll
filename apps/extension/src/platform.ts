@@ -115,6 +115,11 @@ export const extensionPlatform: PlatformApi = {
       browser.runtime
         .sendMessage({ type: 'SYNC_AI', aiId, aiName, taskId })
         .then(() => undefined),
+    // 重试发送：请求 background 复用该 AI 标签页重新注入引擎（同一任务）
+    retryAi: (aiId, aiName, taskId, question) =>
+      browser.runtime
+        .sendMessage({ type: 'RETRY_AI', aiId, aiName, taskId, question })
+        .then(() => undefined),
     onReply: (handler) => {
       const listener = (msg: unknown) => {
         if (!msg || typeof msg !== 'object') return;

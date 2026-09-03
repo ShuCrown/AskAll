@@ -22,17 +22,11 @@ import {
   useAskStore,
   type TurnView,
 } from '../../store/askStore';
-import { ANSWER_MAX_LEN } from '../../utils/history';
 import type { AiStatus } from '../../utils/task';
 import AiAnswerCard from './AiAnswerCard';
 import Composer from './Composer';
 import Tooltip from '../ui/tooltip';
 import { PanelExpandedContext } from '../panel-mode';
-
-/** 判断快照文本是否被截断过（truncateAnswer 的尾部标记） */
-function isTruncated(text: string): boolean {
-  return text.includes('…[内容已截断');
-}
 
 function TurnBlock({
   turn,
@@ -158,8 +152,8 @@ function TurnBlock({
                   status={r.status as AiStatus}
                   text={r.answer}
                   url={r.url}
-                  truncated={r.answer.length >= ANSWER_MAX_LEN}
                   taskId={turn.taskId}
+                  question={turn.question}
                 />
               </div>
             );
@@ -201,7 +195,6 @@ function TurnBlock({
                       : snap.text
                   }
                   url={link}
-                  truncated={isTruncated(snap.text)}
                 />
               </div>
             );
@@ -280,11 +273,9 @@ export default function ChatView({ convKey }: { convKey: string }) {
   // 时间线自动滚动：贴底跟随流式更新，但用户上滑（离开底部）即暂停，滚回底部恢复；
   // 新增轮次时仅当贴底才跳底。直接设 scrollTop 而非 scrollIntoView：避免连带滚动宿主页面。
   const timelineRef = useRef<HTMLDivElement>(null);
-  const stickRef = useRef(true);
   // 用户最近一次主动滚动的时间戳：流式更新到达与用户上滑存在「一帧级」竞争——
-  // 若更新触发跳底时用户刚开滚（stickRef 尚未被 scroll 事件置 false），会把视图反复
-  // 拉回底部，造成闪烁且无法向上滚动。用该时间戳做「刚滚动让位」守卫，滚动手势生效
-  // 后的一小段时间内暂停自动跟随，彻底避免跟随与手动滚动互相打架。
+  // 若更新触发跳底时用户刚开滚，会把视图反复拉回底部，造成闪烁且无法向上滚动。
+  // 用该时间戳做「刚滚动让位」守卫，滚动手势生效后的一小段时间内暂停自动跟随。
   const lastUserScrollRef = useRef(0);
   const liveSignature = liveResults
     .map((r) => `${r.status}:${r.answer.length}`)
@@ -293,42 +284,56 @@ export default function ChatView({ convKey }: { convKey: string }) {
   useEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
+    // scroll 事件同时用于登记手势与更新「是否贴底」；贴底判定由 auto-follow 在跳底前
+    // 用实时位置重测（卡片内部滚动会吞掉滚轮、吞掉时间线的 scroll 事件，缓存会失真）
     const onScroll = () => {
       lastUserScrollRef.current = Date.now();
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      stickRef.current = dist < 40;
+    };
+    // 滚轮/触摸一开始就登记用户手势：scroll 事件比手势本身晚一拍，
+    // 若不提前登记，流式更新触发的 rAF 会在手势生效前先跳底，滚动被反复拉回。
+    const onGesture = () => {
+      lastUserScrollRef.current = Date.now();
     };
     el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    el.addEventListener('wheel', onGesture, { passive: true });
+    el.addEventListener('touchstart', onGesture, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('wheel', onGesture);
+      el.removeEventListener('touchstart', onGesture);
+    };
   }, []);
 
   // 流式更新跟随：用 useLayoutEffect（paint 前同步滚动）消除「先渲染增高再回拉」
   // 造成的抖动，并用 rAF 合并同一帧内的多次内容更新，避免高频 setScrollTop。
   // 用户刚滚动过（300ms 内）时让位，不打断其阅读位置。
+  // 关键：跳底前再实测一次滚动位置（not 只信缓存的 stickRef）——卡片内部 overflow-y-auto
+  // 会吞掉滚轮（时间线没真正滚动，stickRef 仍是 true），此时必须按真实位置判定，避免把
+  // 用户已上滑的时间线拉回底部。
   useLayoutEffect(() => {
     const el = timelineRef.current;
-    if (!el || !stickRef.current) return;
+    if (!el) return;
     if (Date.now() - lastUserScrollRef.current < 300) return;
     const raf = requestAnimationFrame(() => {
       const cur = timelineRef.current;
-      if (
-        cur &&
-        stickRef.current &&
-        Date.now() - lastUserScrollRef.current >= 300
-      ) {
-        cur.scrollTop = cur.scrollHeight;
+      if (!cur) return;
+      if (Date.now() - lastUserScrollRef.current >= 300) {
+        const atBottom = cur.scrollHeight - cur.scrollTop - cur.clientHeight < 5;
+        if (atBottom) cur.scrollTop = cur.scrollHeight;
       }
     });
     return () => cancelAnimationFrame(raf);
   }, [liveSignature]);
 
   // 新增轮次时跳底：仅当用户本就贴底才跳底，并保持跟随；
-  // 用户已上滚（stickRef=false）时不打断其阅读位置，也不强制重置跟随状态。
+  // 用户已上滚时不打断其阅读位置，也不强制重置跟随状态。
   useLayoutEffect(() => {
     const el = timelineRef.current;
-    if (!el || !stickRef.current) return;
+    if (!el) return;
     if (Date.now() - lastUserScrollRef.current < 300) return;
-    el.scrollTop = el.scrollHeight;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 5) {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [turns.length]);
 
   if (turns.length === 0) {

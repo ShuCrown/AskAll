@@ -98,6 +98,17 @@ export interface PlatformAsk {
    * 重新读取当前回答并回传（用于面板手动刷新，兜底引擎自动同步失效的场景）。
    */
   syncAi?(aiId: string, aiName: string, taskId: string): Promise<void>;
+  /**
+   * 重试某 AI 的自动发送：复用该 AI 已打开的聊天标签页，用同一任务（taskId）
+   * 重新注入引擎跑一遍填充/发送，卡片原地更新、不产生新任务/新历史。
+   * `question` 由前端传入（后台内存 tasks 在 SW 重启后会丢失，不能依赖）。
+   */
+  retryAi?(
+    aiId: string,
+    aiName: string,
+    taskId: string,
+    question: string,
+  ): Promise<void>;
   /** 订阅各 AI 回复进度。返回取消订阅函数。 */
   onReply(handler: (msg: ReplyMessage) => void): () => void;
 }

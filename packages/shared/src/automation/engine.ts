@@ -149,7 +149,58 @@ export async function runAutomation(
     return r.width > 0 && r.height > 0;
   };
 
-  const textOf = (el: Element): string => (el.textContent || '').trim();
+  /** 块级标签：跨块补换行，还原站点/Markdown 的分段展示。
+   *  textContent 会把「段一<div>段二」直接拼成一行，导致抓到的回答在面板里
+   *  挤成一坨（deepseek/豆包等的 markdown 回答就是块级元素逐段渲染）。
+   *  这里递归收集文本，在块级元素边界补 \n，与前端 remark-breaks 配合按行展示。 */
+  const BLOCK_TAGS =
+    'P,DIV,SECTION,ARTICLE,PRE,UL,OL,LI,BLOCKQUOTE,H1,H2,H3,H4,H5,H6,TABLE,TR,FIGURE'.split(
+      ',',
+    );
+  /** 交互按钮（复制/点赞/继续提问等）不是回答内容，抓取时应跳过，避免混入按钮文案。
+   *  注意不能跳过 <a>：回答正文里的 markdown 链接是 <a>，删了会丢链接文字。 */
+  const isButton = (n: Element): boolean =>
+    n.tagName === 'BUTTON' || n.getAttribute('role') === 'button';
+  const textOf = (el: Element): string => {
+    let out = '';
+    const nl = (): void => {
+      if (out.length > 0 && !out.endsWith('\n')) out += '\n';
+    };
+    const walk = (node: Node): void => {
+      if (node.nodeType === 3) {
+        const t = node.textContent ?? '';
+        if (t) out += t;
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      const n = node as Element;
+      const tag = n.tagName;
+      if (tag === 'BR') {
+        nl();
+        return;
+      }
+      if (isButton(n)) return; // 跳过按钮等交互 UI
+      if (tag === 'ASIDE' || tag === 'NAV') return; // 跳过侧栏/导航（header 不跳，回答区常见顶部标题栏）
+      // 按位置跳过左侧栏容器（deepseek 等普通 div 侧栏，标签匹配不到）
+      if (sideAreaRefs().has(n)) return;
+      if (BLOCK_TAGS.includes(tag)) nl();
+      const kids = n.childNodes;
+      for (const k of kids) walk(k);
+      if (BLOCK_TAGS.includes(tag)) nl();
+    };
+    walk(el);
+    return out.trim();
+  };
+  /** 观察诊断快照：写入 window（生产构建会剥掉 console.log，故用全局对象）。
+   *  排查「回复完成但仍显示回复中」时，在 AI 页面控制台执行
+   *  copy(JSON.stringify(window.__askallObsDebug)) 即可取到当前观察状态。 */
+  const dbgState = (o: Record<string, unknown>): void => {
+    try {
+      (window as unknown as Record<string, unknown>).__askallObsDebug = o;
+    } catch {
+      /* ignore */
+    }
+  };
 
   // ---------- 后台标签页节流对抗 ----------
   // AI 标签页常在后台打开，站点会依据 document.hidden 暂停流式渲染，
@@ -210,11 +261,74 @@ export async function runAutomation(
   // ---------- 回传通道 ----------
   // MAIN world 没有 chrome.runtime，统一派发 CustomEvent，
   // 由同页面 ISOLATED world 的 content script 桥接转发到 background。
+  /** 按章节标题剥离回答里的非正文段（思考过程/参考资料）。
+   *  保守规则，只剥离「清晰闭合」的章节，绝不吃掉回答正文：
+   *   - 章节内容后被空行闭合 → 跳过标题 + 内容；
+   *   - 章节延伸到文本结尾、且标题不在文本最开头（参考资料类尾部）→ 整段跳过；
+   *   - 其余情况（思考段在开头、后面无空行直接接正文）→ 只跳过标题行、保留后续，
+   *     避免把回答一起吞掉（吞掉会让 sig 为空 → diff 失效回退到残缺的 selector）。 */
+  const stripSections = (text: string, markers?: string[]): string => {
+    if (!markers || markers.length === 0 || !text) return text;
+    const lines = text.split('\n');
+    const isMarker = (l: string): boolean => {
+      const t = l.trim();
+      return markers.some((m) => t.startsWith(m));
+    };
+    const out: string[] = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i]!;
+      if (isMarker(line)) {
+        // 找该章节的结束：下一个空行 或 下一个章节标题 或 文本结尾
+        let j = i + 1;
+        while (
+          j < lines.length &&
+          lines[j]!.trim() !== '' &&
+          !isMarker(lines[j]!)
+        ) {
+          j++;
+        }
+        if (lines[j]!.trim() === '') {
+          i = j + 1; // 空行闭合：跳过标题 + 内容（含空行）
+          continue;
+        }
+        if (j >= lines.length && i > 0) {
+          i = lines.length; // 尾部区块（标题不在开头）→ 整段跳过
+          continue;
+        }
+        i++; // 未闭合/思考段在开头：只跳过标题行，保留后续内容，避免误吞回答
+        continue;
+      }
+      out.push(line);
+      i++;
+    }
+    return out.join('\n').trim();
+  };
+
+  /** 稳定信号文本：剥离思考段 + 去掉块级换行。
+   *  回答的块级结构若被站点重渲染（换行位置变），含换行的 textOf 会一直变、
+   *  把 DONE 拖住，面板表现为「网页已返回却还在慢慢追加」。去换行后只按真实
+   *  文本内容判稳定，结构变化不再影响。 */
+  const sigText = (el: Element): string => {
+    const t = recipe.stripSections
+      ? stripSections(textOf(el), recipe.stripSections)
+      : textOf(el);
+    return t.replace(/\n+/g, '');
+  };
+
   const send = (msg: Record<string, unknown>): void => {
     try {
+      const out = { ...msg };
+      // 回传前剥离思考过程/参考资料等非正文章节（仅处理回答文本消息）
+      if (
+        typeof out.text === 'string' &&
+        (out.type === 'AI_REPLY' || out.type === 'AI_REPLY_DONE')
+      ) {
+        out.text = stripSections(out.text, recipe.stripSections);
+      }
       window.dispatchEvent(
         new CustomEvent('askall:ai-reply', {
-          detail: { ...msg, aiName: meta.aiName, aiId: meta.aiId, taskId: meta.taskId },
+          detail: { ...out, aiName: meta.aiName, aiId: meta.aiId, taskId: meta.taskId },
         }),
       );
     } catch {
@@ -1359,6 +1473,59 @@ export async function runAutomation(
   };
 
   // ---------- 观察策略 ----------
+  /** 缓存页面里的导航/侧栏元素：判断容器是否包住 UI 壳（避免 pick 选中顶层 app 容器，
+   *  把左侧栏/底部按钮文本混进回答）。1.5s 缓存足够（导航结构不会频繁变）。 */
+  const chromeRefs = (() => {
+    let list: Element[] = [];
+    let at = 0;
+    return (): Element[] => {
+      if (Date.now() - at > 1500) {
+        try {
+          list = Array.from(
+            document.querySelectorAll(
+              // 注意不能含 header：主内容区常带顶部 header（标题栏），
+              // 含 header 会导致整个主内容容器被排除，提交确认与观察双双失效
+              'aside, nav, [role="navigation"], [role="banner"], [role="complementary"]',
+            ),
+          );
+        } catch {
+          list = [];
+        }
+        at = Date.now();
+      }
+      return list;
+    };
+  })();
+  /** 按位置识别的侧栏容器集合（deepseek 等左侧历史栏是普通 div，标签/role 匹配不到，
+   *  只能靠 inSideArea 的左侧区域/语义判断）。只保留最外层侧栏容器，2s 缓存。
+   *  用于：collectBlocks 排除「包住侧栏的容器」，textOf 跳过侧栏文本。 */
+  const sideAreaRefs = (() => {
+    let set: Set<Element> = new Set();
+    let at = 0;
+    return (): Set<Element> => {
+      if (Date.now() - at > 2000) {
+        const s = new Set<Element>();
+        try {
+          const temp: Element[] = [];
+          for (const el of document.querySelectorAll(
+            'div, aside, nav, section, header, ul',
+          )) {
+            if (inSideArea(el)) temp.push(el);
+          }
+          // 只保留最外层：被其它侧栏元素包含的去掉，避免把侧栏里所有 div 都塞进集合
+          for (const a of temp) {
+            if (!temp.some((b) => b !== a && b.contains(a))) s.add(a);
+          }
+        } catch {
+          /* ignore */
+        }
+        set = s;
+        at = Date.now();
+      }
+      return set;
+    };
+  })();
+
   const collectBlocks = (): Array<{ el: Element; len: number }> => {
     const out: Array<{ el: Element; len: number }> = [];
     let nodes: NodeListOf<Element>;
@@ -1370,6 +1537,8 @@ export async function runAutomation(
     // 排除输入区（composer）块：附件 chip 的文件名/上传进度文本增长不是
     // 「内容增长」，会把提交判定与观察基线双双带偏
     const comp = composerRoot();
+    const chrome = chromeRefs();
+    const side = sideAreaRefs();
     const cap = Math.min(nodes.length, 3000);
     for (let i = 0; i < cap; i++) {
       const el = nodes[i];
@@ -1378,6 +1547,11 @@ export async function runAutomation(
       if (comp && (el === comp || comp.contains(el))) continue;
       // 排除侧栏/导航块：左侧历史栏懒加载会伪装成「回答增长」
       if (inSideArea(el)) continue;
+      // 排除「包住导航/侧栏的顶层容器」：它随着回答增长也会增长，但文本含侧栏 UI
+      if (chrome.some((c) => c !== el && el.contains(c))) continue;
+      // 按位置排除：容器包住左侧栏（普通 div 侧栏）同样会混入侧栏文本
+      if (side.has(el)) continue;
+      if (Array.from(side).some((c) => el.contains(c))) continue;
       const len = (el.textContent || '').length;
       if (len > 0) out.push({ el, len });
     }
@@ -1417,9 +1591,16 @@ export async function runAutomation(
     // 元素跟踪失效/站点替换 DOM 时死等本策略超时会拖住整条观察链
     const stallGiveUpMs = 8000;
     let lastText = '';
+    // 稳定信号：结构无关（textContent）且剥离思考段，用于判断「回答是否写完」。
+    // 不能用含换行的展示文本做稳定判定——站点结构重渲染/思考过程动画会让它一直变，
+    // 稳定分支（2.5s 无变化才 DONE）迟迟不触发，面板停在「回复中」直到超时。
+    let lastSig = '';
     let stableSince = Date.now();
     let sawReply = false;
     let stalledSince: number | null = null;
+    // 静默期：基线后站点可能晚渲染旧会话（复用/重载标签页时聊天记录是异步加载的）。
+    // 这期间新出现的块先并入基线、不上报，避免把上一次的回答误当成本轮新回复。
+    const settleUntil = startedAt + 2500;
 
     const q = question.trim();
     /** 回显排除：发送后最先出现的增长块往往就是刚发出去的问题本身 */
@@ -1500,6 +1681,14 @@ export async function runAutomation(
           finish(!!lastText);
           return;
         }
+        // 静默期：晚到的旧会话内容先并入基线（按元素记一次长度），
+        // 之后只把「新增长」当作本轮回答，避免旧回复被当成新回复上报。
+        if (Date.now() < settleUntil) {
+          for (const b of collectBlocks()) {
+            if (!base.has(b.el)) base.set(b.el, b.len);
+          }
+          return;
+        }
         const el = pick();
         if (!el) {
           // 已捕获过内容后连续找不到增长块（元素跟踪失效/站点替换 DOM）：
@@ -1524,11 +1713,21 @@ export async function runAutomation(
           return;
         }
         stalledSince = null;
-        const cur = textOf(el);
-        if (cur.length === 0) return;
-        if (cur !== lastText) {
+        const cur = textOf(el); // 展示文本（含换行，回传用）
+        // 稳定信号：剥离思考段 + 去掉块级换行（结构无关），回答写完即稳定 → DONE
+        const sig = sigText(el);
+        dbgState({
+          strategy: 'diff',
+          elapsed: Date.now() - startedAt,
+          sigLen: sig.length,
+          sawReply,
+          sigHead: sig.slice(0, 80),
+        });
+        if (sig.length === 0) return; // 思考期/内容为空：继续等待正文
+        if (sig !== lastSig) {
           sawReply = true;
           lastText = cur;
+          lastSig = sig;
           stableSince = Date.now();
           send({
             type: 'AI_REPLY',
@@ -1571,23 +1770,43 @@ export async function runAutomation(
     const timeout = p.timeoutMs ?? 120_000;
     const startedAt = Date.now();
 
+    // 命中选择器的节点数（诊断用：回答若被拆成多个 markdown 块，只有最后一块会被抓取）
+    let matchedNodes = 0;
     const extract = (): string => {
       for (const sel of sels) {
         // 排除侧栏命中：左侧历史栏的条目也可能带 markdown 类名
         const nodes = qsaSafe(sel).filter((n) => !inSideArea(n));
+        matchedNodes = nodes.length;
         const last = nodes[nodes.length - 1];
         if (last) return textOf(last);
       }
+      matchedNodes = 0;
+      return '';
+    };
+    // 稳定信号：剥离思考段 + 去掉块级换行（结构无关），用于判断「是否写完」
+    const extractSig = (): string => {
+      for (const sel of sels) {
+        const nodes = qsaSafe(sel).filter((n) => !inSideArea(n));
+        matchedNodes = nodes.length;
+        const last = nodes[nodes.length - 1];
+        if (last) return sigText(last);
+      }
+      matchedNodes = 0;
       return '';
     };
 
     // 基线：发送前回答区已有的内容（复用标签页时是上一轮的回答）。
     // 只有相对基线出现「新内容」才上报——否则复用窗口里没发送成功时，
     // 旧会话的最后一条回答会被直接当成本轮结果流出。
-    const base = extract();
-    let lastText = base;
+    let baseSig = extractSig();
+    let lastText = extract();
+    let lastSig = baseSig;
     let sawNew = false;
     let stableSince = Date.now();
+    // 静默期 + 最后变更时间：晚到的旧会话内容（渲染后稳定）先并入基线，
+    // 流式增长的新回答（持续变化）不并入，静默期结束后照常上报。
+    const settleUntil = startedAt + 2500;
+    let lastChange = Date.now();
 
     return new Promise<boolean>((resolve) => {
       let detachWake: () => void = () => {};
@@ -1616,19 +1835,43 @@ export async function runAutomation(
           return;
         }
         const cur = extract();
-        if (cur.length === 0) {
-          // 元素短暂清空（站点重渲染/元素被替换）时不能清空 lastText：
-          // 否则超时补发 DONE 的条件（sawNew && lastText）会因 lastText 被清空
-          // 而落空，面板停在「回复中」。只重置稳定计时，避免元素消失期间
-          // 误判「已稳定」而提前完成。
+        const sig = extractSig();
+        if (sig.length === 0) {
+          // 元素短暂清空（站点重渲染/元素被替换）或仍在思考期（剥离后为空）：
+          // 不能清空 lastText——否则超时补发 DONE 的条件（sawNew && lastText）
+          // 会因 lastText 被清空而落空，面板停在「回复中」。只重置稳定计时。
           stableSince = Date.now();
           return;
         }
-        if (cur !== lastText) {
+        // 静默期：内容出现后若稳定 1.2s，视为晚到的旧会话并入基线；持续变化的
+        // 才是本轮新回答，不并入，静默期结束后照常上报。
+        if (Date.now() < settleUntil) {
+          if (sig !== lastSig) {
+            lastText = cur;
+            lastSig = sig;
+            lastChange = Date.now();
+          } else if (Date.now() - lastChange > 1200) {
+            baseSig = sig;
+            lastText = cur;
+            lastSig = sig;
+            stableSince = Date.now();
+          }
+          return;
+        }
+        if (sig !== lastSig) {
           lastText = cur;
+          lastSig = sig;
           stableSince = Date.now();
-          if (cur !== base) {
+          if (sig !== baseSig) {
             sawNew = true;
+            dbgState({
+              strategy: 'sel',
+              elapsed: Date.now() - startedAt,
+              sigLen: sig.length,
+              curLen: cur.length,
+              nodes: matchedNodes,
+              sigHead: sig.slice(0, 80),
+            });
             send({ type: 'AI_REPLY', text: cur, url: location.href });
           }
         } else if (sawNew && Date.now() - stableSince > stableMs) {
@@ -1682,9 +1925,12 @@ export async function runAutomation(
           return;
         }
         // 增长判定用排除侧栏的内容度量：侧栏懒加载不该触发本兜底；
-        // 文本仍取整页可见文本（走到这一步时往往已无更精确的抓取手段）
+        // 文本用块级换行 + 跳过按钮/导航的正文提取（innerText 会带上侧栏与底部按钮文案），
+        // 并剥离思考段，避免思考动画让它一直变、DONE 迟迟不发。
         const len = contentTextLen();
-        const cur = (document.body.innerText || '').trim();
+        const cur = recipe.stripSections
+          ? stripSections(textOf(document.body), recipe.stripSections)
+          : textOf(document.body);
         if (len > ctx.pageTextBaseline + 20 && cur !== lastText) {
           lastText = cur;
           stableSince = Date.now();
@@ -1893,10 +2139,20 @@ export async function runAutomation(
     // 会让定位时采集的观察基线全部失效（旧元素已不在 DOM，所有块都成了
     // 「新增块」，历史对话会淹没真正的回答）。等渲染稳定后重采基线，
     // 观察阶段的增量就只剩回答的流式增长。
+    // 注意：若发送后页面【没跳转】（同会话追加，如 deepseek 追问），不能用 settle 后
+    // 的基线——快速返回的回答会被它吞掉，observe 找不到新增长，面板停在「发送中」。
+    // 此时用「发送确认时刻」的基线，让观察期能抓到新回答的增长。
     if (ok && step.id === 'submit') {
+      const preBlock = snapshotBlocks();
+      const prePage = contentTextLen();
       await settle(4000);
-      ctx.blockBaseline = snapshotBlocks();
-      ctx.pageTextBaseline = contentTextLen();
+      if (location.href !== ctx.initialHref) {
+        ctx.blockBaseline = snapshotBlocks();
+        ctx.pageTextBaseline = contentTextLen();
+      } else {
+        ctx.blockBaseline = preBlock;
+        ctx.pageTextBaseline = prePage;
+      }
     }
 
     if (!ok) {

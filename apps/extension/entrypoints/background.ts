@@ -7,6 +7,7 @@ import {
   applyMemory,
   recordStepResult,
   addHistory,
+  getHistory,
   updateHistoryUrl,
   mergeAnswer,
   genId,
@@ -66,16 +67,62 @@ function attachmentMeta(attachments: AttachmentPayload[]) {
 function probeReply(
   selectors: string[],
   meta: { aiName: string; aiId: string; taskId: string },
+  stripMarkers: string[] = [],
 ): void {
   const sels = selectors.length
     ? selectors
     : ['[class*="markdown"]', '[class*="answer"]', '[class*="response"]'];
+  /** 按章节标题剥离思考过程/参考资料等非正文段（与引擎 stripSections 一致）。
+   *  保守：只剥「空行闭合」或「非开头标题延伸到结尾」的章节，不吞正文。 */
+  const stripSections = (text: string): string => {
+    if (!stripMarkers.length || !text) return text;
+    const lines = text.split('\n');
+    const isMarker = (l: string): boolean => {
+      const t = l.trim();
+      return stripMarkers.some((m) => t.startsWith(m));
+    };
+    const out: string[] = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i]!;
+      if (isMarker(line)) {
+        let j = i + 1;
+        while (
+          j < lines.length &&
+          lines[j]!.trim() !== '' &&
+          !isMarker(lines[j]!)
+        ) {
+          j++;
+        }
+        if (lines[j]!.trim() === '') {
+          i = j + 1;
+          continue;
+        }
+        if (j >= lines.length && i > 0) {
+          i = lines.length;
+          continue;
+        }
+        i++;
+        continue;
+      }
+      out.push(line);
+      i++;
+    }
+    return out.join('\n').trim();
+  };
   const send = (m: Record<string, unknown>) => {
     try {
+      const out = { ...m };
+      if (
+        typeof out.text === 'string' &&
+        (out.type === 'AI_REPLY' || out.type === 'AI_REPLY_DONE')
+      ) {
+        out.text = stripSections(out.text);
+      }
       window.dispatchEvent(
         new CustomEvent('askall:ai-reply', {
           detail: {
-            ...m,
+            ...out,
             aiName: meta.aiName,
             aiId: meta.aiId,
             taskId: meta.taskId,
@@ -87,11 +134,45 @@ function probeReply(
     }
   };
   const extract = (): string => {
+    // 块级边界补 \n（与引擎 textOf 一致）：textContent 会把逐段渲染的回答拼成一行
+    const BLOCK_TAGS =
+      'P,DIV,SECTION,ARTICLE,PRE,UL,OL,LI,BLOCKQUOTE,H1,H2,H3,H4,H5,H6,TABLE,TR,FIGURE'.split(
+        ',',
+      );
+    const textOf = (el: Element): string => {
+      let out = '';
+      const nl = (): void => {
+        if (out.length > 0 && !out.endsWith('\n')) out += '\n';
+      };
+      const walk = (node: Node): void => {
+        if (node.nodeType === 3) {
+          const t = node.textContent ?? '';
+          if (t) out += t;
+          return;
+        }
+        if (node.nodeType !== 1) return;
+        const n = node as Element;
+        const tag = n.tagName;
+        if (tag === 'BR') {
+          nl();
+          return;
+        }
+        // 跳过按钮/导航等 UI，避免回答混入按钮文案与侧栏文本（header 不跳）
+        if (tag === 'BUTTON' || n.getAttribute('role') === 'button') return;
+        if (tag === 'ASIDE' || tag === 'NAV') return;
+        if (BLOCK_TAGS.includes(tag)) nl();
+        const kids = n.childNodes;
+        for (const k of kids) walk(k);
+        if (BLOCK_TAGS.includes(tag)) nl();
+      };
+      walk(el);
+      return out.trim();
+    };
     for (const sel of sels) {
       try {
         const nodes = document.querySelectorAll(sel);
         if (nodes.length) {
-          const t = (nodes[nodes.length - 1]!.textContent || '').trim();
+          const t = textOf(nodes[nodes.length - 1]!);
           if (t) return t;
         }
       } catch {
@@ -412,6 +493,22 @@ export default defineBackground(() => {
       );
       return;
     }
+    // 重试发送：复用该 AI 标签页重新注入引擎（同一任务，卡片原地更新）。
+    // question 由前端传入（后台内存 tasks 在 SW 重启后会丢失，不能依赖）
+    if (
+      msg?.type === 'RETRY_AI' &&
+      msg.aiId &&
+      msg.taskId &&
+      typeof msg.question === 'string'
+    ) {
+      void retryAiTab(
+        String(msg.aiId),
+        String(msg.aiName ?? ''),
+        String(msg.taskId),
+        msg.question,
+      );
+      return;
+    }
   });
 
   async function openSettingsPage() {
@@ -690,15 +787,28 @@ export default defineBackground(() => {
     // 回填历史条目 id：AI_REPLY_DONE 时据此把回答快照写入正确的历史记录
     task.historyId = historyItem.id;
 
-    // 优先复用已打开的「原有」聊天窗口
+    // 优先复用已打开的「原有」聊天窗口；续旧会话分两类：
+    //  - 有真实会话 URL（deepseek/千问等每会话独立 URL）：导航到旧会话续聊；
+    //  - 无会话 URL（豆包/文心/元宝等 SPA 平台）：复用当前标签页且【不重载】，
+    //    保留内存里的会话上下文直接追加，避免重开新话题。
     const reused = new Set<string>();
     for (const ai of targets) {
       if (!ai.autoSend || reused.has(ai.id)) continue;
-      const existing = await findExistingChatTab(ai);
-      if (existing) {
-        reused.add(ai.id);
-        trackTab(existing.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
-        injectAutomation(existing.tabId, question, ai, taskId, memory, attachments);
+      const convUrl = await findConversationUrl(convId, ai.id, ai.name);
+      if (convUrl) {
+        const existing = await findExistingChatTab(ai, convUrl);
+        if (existing) {
+          reused.add(ai.id);
+          trackTab(existing.tabId, historyItem.id, ai.id, ai.name, convUrl);
+          injectAutomation(existing.tabId, question, ai, taskId, memory, attachments);
+        }
+      } else {
+        const live = await findLiveChatTab(ai);
+        if (live) {
+          reused.add(ai.id);
+          trackTab(live.tabId, historyItem.id, ai.id, ai.name, buildUrl(ai, question));
+          injectAutomation(live.tabId, question, ai, taskId, memory, attachments);
+        }
       }
     }
 
@@ -707,12 +817,14 @@ export default defineBackground(() => {
     // 把同一轮拆成两半（追问轮部分 AI 卡片丢失的根因）。
     const missed = targets.filter((ai) => !reused.has(ai.id));
     for (const ai of missed) {
-      const url = buildUrl(ai, question);
+      const convUrl =
+        (await findConversationUrl(convId, ai.id, ai.name)) ??
+        buildUrl(ai, question);
       void browser.tabs
-        .create({ url, active: false })
+        .create({ url: convUrl, active: false })
         .then((tab) => {
           if (tab.id == null) return;
-          trackTab(tab.id, historyItem.id, ai.id, ai.name, url);
+          trackTab(tab.id, historyItem.id, ai.id, ai.name, convUrl);
           if (ai.autoSend) {
             injectAutomation(tab.id, question, ai, taskId, memory, attachments);
           } else if (attachments.length) {
@@ -738,6 +850,45 @@ export default defineBackground(() => {
     return ai.url;
   }
 
+  /** 是否真实会话路径（/chat/、/s/、/c/、/conversation/）。
+   *  只有这类 URL 打开后会加载「该对话」；base 与 {query} 形态是新建会话，不能用。 */
+  function isConversationPath(url: string): boolean {
+    try {
+      const path = new URL(url).pathname;
+      return /\/chat\/|\/s\/|\/c\/|\/conversation\//.test(path);
+    } catch {
+      return false;
+    }
+  }
+
+  /** 从历史里取某 AI 最近一轮的真实会话 URL（按 conversationId 定位会话）。
+   *  仅返回会话路径形态；base/{query} 与缺失一律返回 undefined，由调用方回退。 */
+  async function findConversationUrl(
+    conversationId: string,
+    aiId: string,
+    aiName: string,
+  ): Promise<string | undefined> {
+    if (!conversationId) return undefined;
+    try {
+      const history = await getHistory();
+      // 历史最新在前：按会话 id 过滤，取最近一条里该 AI 的链接/快照 URL
+      for (const h of history) {
+        if ((h.conversationId || h.id) !== conversationId) continue;
+        const link = (h.aiUrls ?? []).find(
+          (l) => (aiId && l.id === aiId) || (!aiId && l.name === aiName),
+        );
+        const snap = (h.answers ?? []).find(
+          (s) => (aiId && s.aiId === aiId) || (!aiId && s.name === aiName),
+        );
+        const url = link?.url ?? snap?.url;
+        if (url && isConversationPath(url)) return url;
+      }
+    } catch {
+      /* 历史读取失败按无记录处理 */
+    }
+    return undefined;
+  }
+
   /**
    * 查找某个 AI 已打开的聊天标签页（跨后台会话也能命中）。
    *
@@ -745,9 +896,11 @@ export default defineBackground(() => {
    * 打开的——content script 只对新导航注入，旧页面里站点仍处于懒渲染状态
    * （组件不挂载/发送按钮不渲染）；也可能残留上一次发送未清掉的草稿。
    * 重载后伪装脚本注入、页面回到干净的可自动化状态。
+   * `targetUrl` 提供时（追问续旧会话）改为导航到该会话 URL，而非重载回 base。
    */
   async function findExistingChatTab(
     ai: AiConfig,
+    targetUrl?: string,
   ): Promise<{ tabId: number } | undefined> {
     try {
       const origin = getOrigin(ai.url);
@@ -758,7 +911,11 @@ export default defineBackground(() => {
       if (target?.id == null) return undefined;
       const tabId = target.id;
       try {
-        await browser.tabs.reload(tabId);
+        if (targetUrl && isConversationPath(targetUrl)) {
+          await browser.tabs.update(tabId, { url: targetUrl });
+        } else {
+          await browser.tabs.reload(tabId);
+        }
         const deadline = Date.now() + 10_000;
         while (Date.now() < deadline) {
           const t = await browser.tabs.get(tabId);
@@ -769,6 +926,24 @@ export default defineBackground(() => {
         /* 标签页已关闭等，忽略 */
       }
       return { tabId };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 复用已打开的标签页但【不重载】：SPA 平台（豆包/文心/元宝等无独立会话 URL）追问时
+   *  直接注入到当前页面，保留其内存里的会话上下文，实现同会话追加而非重开新话题。 */
+  async function findLiveChatTab(
+    ai: AiConfig,
+  ): Promise<{ tabId: number } | undefined> {
+    try {
+      const origin = getOrigin(ai.url);
+      if (!origin) return undefined;
+      const tabs = await browser.tabs.query({ url: `${origin}/*` });
+      const target =
+        tabs.find((t) => t.id != null && t.status === 'complete') ?? tabs[0];
+      if (target?.id == null) return undefined;
+      return { tabId: target.id };
     } catch {
       return undefined;
     }
@@ -842,7 +1017,11 @@ export default defineBackground(() => {
         target: { tabId: target.id },
         world: 'MAIN',
         func: probeReply,
-        args: [selectors, { aiName, aiId, taskId }],
+        args: [
+          selectors,
+          { aiName, aiId, taskId },
+          recipe.stripSections ?? [],
+        ],
       });
     } catch (e) {
       console.warn(`[multi-ai-ask] 手动同步 ${aiName} 失败:`, e);
@@ -850,6 +1029,72 @@ export default defineBackground(() => {
   }
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * 重试某 AI 的自动发送：复用该 AI 已打开的标签页（不重载），用同一 taskId
+   * 重新注入引擎跑一遍填充/发送。卡片原地更新、不产生新任务/新历史。
+   * - 优先复用 tabTrack 里本任务已用的标签页（带会话状态），否则按 origin 找已打开的；
+   * - 找不到才新开标签页；
+   * - question 由前端传入，SW 重启后后台 tasks 为空也能重试；
+   * - 附件不重附（dataUrl 仅在后台内存/SW 生命周期内存在）。
+   */
+  async function retryAiTab(
+    aiId: string,
+    aiName: string,
+    taskId: string,
+    question: string,
+  ) {
+    try {
+      const { aiConfigs } = await loadContext();
+      const ai = aiConfigs.find((c) => c.id === aiId);
+      if (!ai?.url || !ai.autoSend) return;
+
+      // 重置为该 AI 发送中：广播 AI_SENDING 让面板卡片回到 sending
+      updateResult(taskId, aiId, {
+        status: 'sending',
+        answer: '',
+        error: undefined,
+      });
+      broadcastReply({ type: 'AI_SENDING', taskId, aiId, aiName });
+
+      const task = taskId ? tasks.get(taskId) : undefined;
+      const memory = await loadMemory();
+
+      // 优先复用 tabTrack 里本任务已用的标签页（保留会话状态）
+      let tabId: number | undefined;
+      for (const [tid, t] of tabTrack) {
+        if (t.aiId === aiId) {
+          tabId = tid;
+          break;
+        }
+      }
+      // 否则按 origin 找已打开的标签页（不重载，保持用户在页面的会话状态）
+      if (tabId == null) {
+        const origin = getOrigin(ai.url);
+        if (origin) {
+          const tabs = await browser.tabs.query({ url: `${origin}/*` });
+          const target =
+            tabs.find((t) => t.id != null && t.status === 'complete') ?? tabs[0];
+          tabId = target?.id;
+        }
+      }
+
+      if (tabId == null) {
+        // 没有可复用的标签页：新开一个并注入
+        const url = buildUrl(ai, question);
+        const tab = await browser.tabs.create({ url, active: false });
+        if (tab.id != null) {
+          trackTab(tab.id, task?.historyId ?? '', ai.id, ai.name, url);
+          injectAutomation(tab.id, question, ai, taskId, memory, []);
+        }
+        return;
+      }
+      injectAutomation(tabId, question, ai, taskId, memory, []);
+    } catch (e) {
+      console.warn(`[multi-ai-ask] 重试 ${aiName} 失败:`, e);
+    }
+  }
+
 
   /**
    * 补注入 MAIN↔ISOLATED 回复桥。

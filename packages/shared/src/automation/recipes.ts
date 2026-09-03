@@ -162,8 +162,19 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'wenxin',
     name: '文心一言',
-    version: 2,
+    version: 3,
     url: 'https://wenxin.baidu.com/',
+    // 回答会混入「思考过程」与「参考资料」等非正文段：按章节标题行剥离，
+    // 只保留真正回答正文
+    stripSections: [
+      '思考过程',
+      '深度思考',
+      '已深度思考',
+      '参考资料',
+      '引用资料',
+      '参考来源',
+      '参考了这些资料',
+    ],
     steps: genericSteps(
       [
         'textarea#chat-textarea',
@@ -200,8 +211,19 @@ export const DEFAULT_RECIPES: Recipe[] = [
   {
     id: 'yuanbao',
     name: '元宝',
-    version: 1,
+    version: 2,
     url: 'https://yuanbao.tencent.com/',
+    // 回答前常出现「开始思考/正在搜索」等状态文案，不是真实回答：按章节标题剥离
+    stripSections: [
+      '开始思考',
+      '正在思考',
+      '思考中',
+      '深度思考',
+      '开始搜索',
+      '正在搜索',
+      '搜索中',
+      '正在检索',
+    ],
     steps: genericSteps(
       ['textarea', 'div[contenteditable="true"]', 'div[role="textbox"]'],
       [

@@ -23,19 +23,19 @@ const textOf = (children: unknown): string =>
 
 const components: Components = {
   h1: ({ children }) => (
-    <h1 className="mb-1.5 mt-2.5 text-[15px] font-semibold leading-snug">{children}</h1>
+    <h1 className="mb-2 mt-3 text-2xl font-bold leading-snug">{children}</h1>
   ),
   h2: ({ children }) => (
-    <h2 className="mb-1.5 mt-2.5 text-sm font-semibold leading-snug">{children}</h2>
+    <h2 className="mb-1.5 mt-2.5 text-xl font-semibold leading-snug">{children}</h2>
   ),
   h3: ({ children }) => (
-    <h3 className="mb-1 mt-2 text-[13px] font-semibold leading-snug">{children}</h3>
+    <h3 className="mb-1.5 mt-2 text-lg font-semibold leading-snug">{children}</h3>
   ),
   h4: ({ children }) => (
-    <h4 className="mb-1 mt-2 text-xs font-semibold">{children}</h4>
+    <h4 className="mb-1 mt-2 text-base font-semibold">{children}</h4>
   ),
   h5: ({ children }) => (
-    <h5 className="mb-1 mt-2 text-xs font-semibold">{children}</h5>
+    <h5 className="mb-1 mt-2 text-sm font-semibold">{children}</h5>
   ),
   h6: ({ children }) => (
     <h6 className="mb-1 mt-2 text-xs font-semibold text-foreground/80">{children}</h6>
@@ -107,21 +107,9 @@ const components: Components = {
   ),
 };
 
-export default function Markdown({
-  text,
-  clamped = false,
-}: {
-  text: string;
-  /** 折叠：仅显示前 8 行（配合「展开全文」） */
-  clamped?: boolean;
-}) {
+export default function Markdown({ text }: { text: string }) {
   return (
-    <div
-      className={cn(
-        'markdown-body min-w-0 text-xs leading-relaxed text-foreground/90',
-        clamped && 'line-clamp-[8] overflow-hidden',
-      )}
-    >
+    <div className="markdown-body min-w-0 text-xs leading-relaxed text-foreground/90">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={components}
