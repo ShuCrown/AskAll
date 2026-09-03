@@ -29,15 +29,6 @@ export function hasPlatform(): boolean {
   return current !== null;
 }
 
-/** macOS + Tauri：overlay 标题栏下需为红绿灯预留左侧空间 */
-export function isMacTauri(): boolean {
-  return (
-    getPlatform().kind === 'tauri' &&
-    typeof navigator !== 'undefined' &&
-    /Mac/i.test(navigator.platform)
-  );
-}
-
 export type {
   PlatformApi,
   PlatformApp,
@@ -45,7 +36,6 @@ export type {
   PlatformStorage,
   PlatformWindow,
   PlatformAsk,
-  AskGridCell,
   ReplyMessage,
   OpenMode,
 } from './types';

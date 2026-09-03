@@ -45,7 +45,7 @@ const HISTORY_KEY = 'local:history';
 /**
  * 历史条目兜底上限：索引瘦身后单条体积极小（仅问题 + 各 AI 会话 path），
  * 可容纳数千条；近期会话才携带回答快照（见 SNAPSHOT_KEEP）。
- * 扩展端申请了 unlimitedStorage 无配额；桌面端 localStorage ~5MB 也在安全范围内。
+ * 扩展端申请了 unlimitedStorage 无配额，可容纳数千条。
  */
 const MAX_ITEMS = 2000;
 /** 回答快照（回答内容）仅保留最近 N 条历史条目，更早的仅保留话题 + path */
@@ -63,7 +63,7 @@ export function truncateAnswer(text: string): string {
 
 /**
  * 判断回复文本是否为「自动发送失败」的兜底提示。
- * 两端注入脚本（扩展 autoSend.ts / 桌面 auto_send.rs）的兜底文案统一带 【AskAll】 前缀。
+ * 注入脚本（autoSend.ts）的兜底文案统一带 【AskAll】 前缀。
  * 此类文本不是真实回答，UI 应展示为警示态而非回答内容。
  */
 export function isFallbackNotice(text: string): boolean {

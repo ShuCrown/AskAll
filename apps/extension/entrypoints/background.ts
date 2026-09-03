@@ -91,7 +91,7 @@ function probeReply(
       try {
         const nodes = document.querySelectorAll(sel);
         if (nodes.length) {
-          const t = (nodes[nodes.length - 1].textContent || '').trim();
+          const t = (nodes[nodes.length - 1]!.textContent || '').trim();
           if (t) return t;
         }
       } catch {

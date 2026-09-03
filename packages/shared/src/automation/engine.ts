@@ -1342,29 +1342,8 @@ export async function runAutomation(
   const confirmAny = async (): Promise<boolean> => waitSent(3000);
 
   // ---------- 外部唤醒钩子 ----------
-  // 内嵌 webview（Tauri 桌面端）失焦/后台时，macOS WKWebView 会节流 JS 定时器
-  // 与 React 调度，引擎的发送检测轮询与观察 setInterval 会停滞，表现为面板
-  // 一直停在「正在发送」，切回聊天页（webview 重新获得焦点）才回传。
-  // 两个互补机制：
-  //   1. 注册到全局 __askallObservePing —— Rust 侧周期 eval 触发，强制补跑
-  //      各观察策略的 check()（保活心跳，无需用户交互）；
-  //   2. 页面 focus/pointerdown/pageshow/visibilitychange —— 用户切回聊天页、
-  //      点击页面的瞬间立刻补跑一次，做到「一回来就看到内容」。
-  const pingTargets = new Set<() => void>();
-  const registerPing = (fn: () => void): void => {
-    pingTargets.add(fn);
-    try {
-      (window as unknown as { __askallObservePing?: () => void }).__askallObservePing =
-        () => {
-          for (const f of pingTargets) f();
-        };
-    } catch {
-      /* ignore */
-    }
-  };
-  const unregisterPing = (fn: () => void): void => {
-    pingTargets.delete(fn);
-  };
+  // 页面 focus/pointerdown/pageshow/visibilitychange：用户切回聊天页、点击页面
+  // 的瞬间立刻补跑一次观察，做到「一回来就看到内容」（后台标签页定时器被节流时兜底）。
   const addWakeListeners = (fn: () => void): (() => void) => {
     const on = (): void => fn();
     window.addEventListener('focus', on);
@@ -1503,7 +1482,6 @@ export async function runAutomation(
           /* ignore */
         }
         timer();
-        unregisterPing(check);
         detachWake();
         resolve(ok);
       };
@@ -1570,7 +1548,6 @@ export async function runAutomation(
         observer = null;
       }
       const timer = interval(check, 1000);
-      registerPing(check);
       detachWake = addWakeListeners(check);
       check();
     });
@@ -1612,7 +1589,6 @@ export async function runAutomation(
           /* ignore */
         }
         timer();
-        unregisterPing(check);
         detachWake();
         resolve(ok);
       };
@@ -1664,7 +1640,6 @@ export async function runAutomation(
         observer = null;
       }
       const timer = interval(check, 1000);
-      registerPing(check);
       detachWake = addWakeListeners(check);
       check();
     });
@@ -1682,7 +1657,6 @@ export async function runAutomation(
       const check = () => {
         if (Date.now() - startedAt > timeout) {
           timer();
-          unregisterPing(check);
           detachWake();
           // 超时但已捕获过内容：补发完成信号，避免面板一直停在「回复中」
           if (lastText) {
@@ -1705,7 +1679,6 @@ export async function runAutomation(
           send({ type: 'AI_REPLY', text: cur, url: location.href });
         } else if (lastText && Date.now() - stableSince > stableMs) {
           timer();
-          unregisterPing(check);
           detachWake();
           send({
             type: 'AI_REPLY_DONE',
@@ -1716,7 +1689,6 @@ export async function runAutomation(
         }
       };
       const timer = interval(check, 1200);
-      registerPing(check);
       detachWake = addWakeListeners(check);
       check();
     });

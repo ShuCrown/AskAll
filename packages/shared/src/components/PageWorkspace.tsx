@@ -1,9 +1,8 @@
 /**
  * PageWorkspace —— 网页内浮层版工作台（扩展端内容脚本注入；宿主页无 tailwind）。
  *
- * 与 popup / 桌面端共用同一个 Workspace 组件，交互完全一致；差别仅在展示载体：
- * 插件的 AI 聊天开在浏览器页签里，回答以时间线卡片展示；桌面端把聊天页内嵌在
- * chat 块（GridChat）里。
+ * 与 popup 共用同一个 Workspace 组件，交互完全一致；AI 的聊天开在浏览器页签里，
+ * 回答以时间线卡片展示。
  *
  * 本组件只负责「浮层卡片」的壳（默认白底 + 拖拽标题栏 + 设置/固定/收起/关闭），
  * 主体渲染 <Workspace density="compact" />。Workspace 的 tailwind 样式由
@@ -28,7 +27,7 @@ import SearchDialog from './workspace/SearchDialog';
 import Tooltip from './ui/tooltip';
 import { PanelExpandedContext } from './panel-mode';
 
-/** 面板默认宽度：工作台需足够宽（与桌面端多聊并排一致） */
+/** 面板默认宽度：工作台需足够宽 */
 const PANEL_WIDTH = 880;
 
 interface PageWorkspaceProps {

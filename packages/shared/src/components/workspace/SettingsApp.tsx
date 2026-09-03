@@ -1,14 +1,12 @@
 /**
  * SettingsApp —— 独立设置载体（v1.1）。
  *
- * 桌面端：独立设置窗口（#settings 路由渲染本组件），右上角不设关闭按钮——
- * macOS 红绿灯 / Windows 窗口按钮即可关闭；
  * 扩展端：options 页渲染本组件，浏览器标签页由用户自行关闭（脚本无法关闭普通标签页）。
  * 内容为 AiConfigPanel。
  */
 import { useEffect, useState } from 'react';
 import AiConfigPanel from '../AiConfigPanel';
-import { getPlatform, isMacTauri } from '../../lib/platform';
+import { getPlatform } from '../../lib/platform';
 
 export default function SettingsApp() {
   const [version, setVersion] = useState('');
@@ -19,12 +17,7 @@ export default function SettingsApp() {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <div
-        data-tauri-drag-region
-        className={`flex shrink-0 items-center border-b bg-card py-4 ${
-          isMacTauri() ? 'pl-[74px] pr-2' : 'px-2'
-        }`}
-      >
+      <div className="flex shrink-0 items-center border-b bg-card px-2 py-4">
         <span className="flex items-center gap-2">
           <img
             src={getPlatform().assets.assetUrl('icon/128.png')}

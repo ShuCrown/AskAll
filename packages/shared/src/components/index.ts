@@ -1,10 +1,9 @@
 export { default as AiConfigPanel } from './AiConfigPanel';
-// 网页内浮层版工作台（扩展端右击/划词入口，与 popup/桌面共用同一 Workspace）
+// 网页内浮层版工作台（扩展端右击/划词入口，与 popup 共用同一 Workspace）
 export { default as PageWorkspace } from './PageWorkspace';
 
 // v1.1 工作台组件（顶部搜索/新话题；历史经搜索弹窗找回；设置独立载体）
 export { default as Workspace } from './workspace/Workspace';
-export { default as GridChat } from './workspace/GridChat';
 export { default as ChatView } from './workspace/ChatView';
 export { default as AiAnswerCard } from './workspace/AiAnswerCard';
 export { default as Markdown } from './workspace/Markdown';

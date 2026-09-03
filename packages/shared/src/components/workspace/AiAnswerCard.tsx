@@ -52,7 +52,7 @@ export default function AiAnswerCard({
 
   const openSource = () => {
     if (!url) return;
-    // 携带 aiId/name：桌面端复用该 AI 的 ai-{aiId} 子窗口（保留当前聊天状态）
+    // 携带 aiId/name：优先复用该 AI 已有的聊天页（保留当前聊天状态）
     getPlatform()
       .ask.openAiTab(url, aiId, name)
       .catch(() => {});

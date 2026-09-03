@@ -80,7 +80,11 @@ export default function AiConfigPanel() {
     const j = index + dir;
     if (j < 0 || j >= aiConfigs.length) return;
     const updated = [...aiConfigs];
-    [updated[index], updated[j]] = [updated[j], updated[index]];
+    const a = updated[index];
+    const b = updated[j];
+    if (a === undefined || b === undefined) return;
+    updated[index] = b;
+    updated[j] = a;
     setAiConfigs(updated);
     getPlatform().storage.setItem(AI_CONFIGS_KEY, updated);
   };

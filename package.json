@@ -3,17 +3,14 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "AskAll 齐问 —— 划词同时向多个 AI 提问。浏览器扩展 + Tauri 桌面端共用同一套 UI。",
+  "description": "AskAll 齐问 —— 划词同时向多个 AI 提问的浏览器扩展（Chrome / Firefox）。",
   "scripts": {
     "dev:extension": "pnpm --filter @askall/extension dev",
     "dev:extension:firefox": "pnpm --filter @askall/extension dev:firefox",
-    "dev:desktop": "pnpm --filter @askall/desktop tauri:dev",
     "build:extension": "pnpm --filter @askall/extension build",
     "build:extension:firefox": "pnpm --filter @askall/extension build:firefox",
-    "build:desktop": "pnpm --filter @askall/desktop tauri:build",
     "zip:extension": "pnpm --filter @askall/extension zip",
-    "typecheck": "pnpm -r --parallel typecheck",
-    "build:web-desktop": "pnpm --filter @askall/desktop build"
+    "typecheck": "pnpm -r --parallel typecheck"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

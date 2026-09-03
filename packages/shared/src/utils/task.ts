@@ -40,7 +40,7 @@ export interface AskTask {
   conversationId: string;
   /**
    * 对应历史记录条目的 id（v1.1 新增，可选）。
-   * 扩展端由 background 在 addHistory 后回填；桌面端由前端 store 自行维护映射。
+   * 扩展端由 background 在 addHistory 后回填。
    * 用于 AI_REPLY_DONE 时把回答快照写入正确的历史条目。
    */
   historyId?: string;

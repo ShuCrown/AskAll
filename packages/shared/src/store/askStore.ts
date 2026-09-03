@@ -4,22 +4,17 @@
  * v1.1 新增。核心原则（见设计方案第四/十一章）：
  *   1. 历史存储（local:history）是会话列表的唯一数据源；
  *      实时流按 taskId 存入 liveTasks，渲染时按轮次合并。
- *   2. AI_REPLY 消息在两端均为「全量文本」（非增量），合并时用替换而非追加。
- *   3. 历史写入按平台分流：扩展端由 background 写；桌面端由本 store 写。
- *      组件层永远不直接写历史。
- *   4. 挂载即 hydrate：popup 失焦销毁后重开、桌面冷启动，都从
+ *   2. AI_REPLY 消息均为「全量文本」（非增量），合并时用替换而非追加。
+ *   3. 历史写入由扩展端 background 负责；组件层永远不直接写历史。
+ *   4. 挂载即 hydrate：popup 失焦销毁后重开、冷启动，都从
  *      getTask() + history 重建视图，不依赖内存残留。
  */
 import { create } from 'zustand';
 import { getPlatform, type ReplyMessage } from '../lib/platform';
 import type { AttachmentPayload } from '../automation/types';
 import {
-  addHistory,
   getHistory,
   groupConversations,
-  isFallbackNotice,
-  mergeAnswer,
-  updateHistoryUrl,
   type Conversation,
   type HistoryItem,
 } from '../utils/history';
@@ -69,7 +64,7 @@ export interface AskStoreState {
   activeConvId: string | null;
   /** taskId -> 实时任务（进行中 + 最近任务） */
   liveTasks: Record<string, AskTask>;
-  /** taskId -> historyId 映射（桌面端落盘回答快照用） */
+  /** taskId -> historyId 映射（background 落盘历史后建立，供轮次合并） */
   taskHistory: Record<string, string>;
   /** AI 配置（已合并默认项） */
   configs: AiConfig[];
@@ -98,11 +93,11 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
   /**
    * 发起提问（ask / followUp）后的统一同步流程：
    *   1. getTask() 取回编排器创建的任务（含 taskId / conversationId）；
-   *   2. 桌面端：由 store 写入历史（扩展端由 background 写，此处仅轮询等待）；
+   *   2. 轮询等待 background 写入历史（此处仅轮询等待）；
    *   3. 激活该会话，驱动右侧时间线展示实时进度。
    *
    * 时序注意：dispatch 是异步的 —— 插件端 background 的 handleAsk/handleFollowUp
-   * 会先 await loadContext 等，随后才设置 currentTaskId；桌面端 Rust 编排同样异步。
+   * 会先 await loadContext 等，随后才设置 currentTaskId。
    * 因此 dispatch 刚返回时 getTask() 可能还是「上一个任务」或空。若直接取，
    * 会把本轮任务当成孤儿任务（taskHistory 映射缺失），buildTurns 就多渲染一个
    * 「空问题 + 全部实时卡片」的重复轮次（追加问答发送两轮的根因）。
@@ -142,41 +137,26 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
         : s.taskHistory,
     }));
 
-    if (platform.kind === 'tauri') {
-      // 桌面端历史由 store 写入（修复 v1.0 桌面历史缺失问题）
-      const names = Object.values(task.results).map((r) => r.aiName);
-      const urls = Object.values(task.results).map((r) => ({
-        id: r.aiId,
-        name: r.aiName,
-        url: r.url ?? '',
-      }));
-      const item = await addHistory(task.question, names, urls, convId);
+    // 扩展端：background 异步写历史，轮询等待其落盘（最多 ~2s），
+    // 期间右侧时间线仍可凭 liveTasks 展示实时进度。
+    // 轮询命中后建立 taskId -> historyId 映射（buildTurns 据此合并轮次，
+    // 否则同一问题会渲染成「历史 + 孤儿实时」两条重复气泡）。
+    // ASK_AI 不等 handleAsk 完成就返回，getTask 可能尚未回填 historyId，
+    // 故不能只依赖 task.historyId。
+    const historyDeadline = Date.now() + 2000;
+    for (;;) {
+      const items = await getHistory();
+      // convId 由本次任务独占，历史最新在前，首个命中即本任务条目
+      const item = items.find((h) => (h.conversationId || h.id) === convId);
       set((s) => ({
-        taskHistory: { ...s.taskHistory, [task.id]: item.id },
+        history: items,
+        taskHistory:
+          item && !s.taskHistory[task.id]
+            ? { ...s.taskHistory, [task.id]: item.id }
+            : s.taskHistory,
       }));
-      await get().refreshHistory();
-    } else {
-      // 扩展端：background 异步写历史，轮询等待其落盘（最多 ~2s），
-      // 期间右侧时间线仍可凭 liveTasks 展示实时进度。
-      // 轮询命中后建立 taskId -> historyId 映射（buildTurns 据此合并轮次，
-      // 否则同一问题会渲染成「历史 + 孤儿实时」两条重复气泡）。
-      // ASK_AI 不等 handleAsk 完成就返回，getTask 可能尚未回填 historyId，
-      // 故不能只依赖 task.historyId。
-      const deadline = Date.now() + 2000;
-      for (;;) {
-        const items = await getHistory();
-        // convId 由本次任务独占，历史最新在前，首个命中即本任务条目
-        const item = items.find((h) => (h.conversationId || h.id) === convId);
-        set((s) => ({
-          history: items,
-          taskHistory:
-            item && !s.taskHistory[task.id]
-              ? { ...s.taskHistory, [task.id]: item.id }
-              : s.taskHistory,
-        }));
-        if (item || Date.now() > deadline) break;
-        await new Promise((r) => setTimeout(r, 200));
-      }
+      if (item || Date.now() > historyDeadline) break;
+      await new Promise((r) => setTimeout(r, 200));
     }
     void kind; // 预留：两种发起目前同步流程一致
   }
@@ -345,22 +325,9 @@ export const useAskStore = create<AskStoreState>()((set, get) => {
         };
       });
 
-      // 回答完成：桌面端由 store 落盘快照与真实会话 URL；随后统一刷新历史
-      // （扩展端快照由 background 写入，这里只是把最新存储读回来）
+      // 回答完成：扩展端快照由 background 写入，这里把最新存储读回来刷新历史
       if (msg.type === 'AI_REPLY_DONE') {
-        const s = get();
-        const historyId = s.taskHistory[msg.taskId];
-        if (getPlatform().kind === 'tauri' && historyId) {
-          const writes = [mergeAnswer(historyId, msg.aiId, msg.aiName, msg.text)];
-          // 真实会话地址（chat/xxx）回写历史：历史回放与 chat tabs 跳转据此直达会话页。
-          // 兜底提示（自动发送失败）不算真实回答，不回写地址。
-          if (msg.url && !isFallbackNotice(msg.text)) {
-            writes.push(updateHistoryUrl(historyId, msg.aiId, msg.aiName, msg.url));
-          }
-          void Promise.all(writes).then(() => get().refreshHistory());
-        } else {
-          void get().refreshHistory();
-        }
+        void get().refreshHistory();
       }
     },
 
