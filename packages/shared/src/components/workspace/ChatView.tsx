@@ -281,6 +281,11 @@ export default function ChatView({ convKey }: { convKey: string }) {
   // 新增轮次时仅当贴底才跳底。直接设 scrollTop 而非 scrollIntoView：避免连带滚动宿主页面。
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  // 用户最近一次主动滚动的时间戳：流式更新到达与用户上滑存在「一帧级」竞争——
+  // 若更新触发跳底时用户刚开滚（stickRef 尚未被 scroll 事件置 false），会把视图反复
+  // 拉回底部，造成闪烁且无法向上滚动。用该时间戳做「刚滚动让位」守卫，滚动手势生效
+  // 后的一小段时间内暂停自动跟随，彻底避免跟随与手动滚动互相打架。
+  const lastUserScrollRef = useRef(0);
   const liveSignature = liveResults
     .map((r) => `${r.status}:${r.answer.length}`)
     .join('|');
@@ -289,6 +294,7 @@ export default function ChatView({ convKey }: { convKey: string }) {
     const el = timelineRef.current;
     if (!el) return;
     const onScroll = () => {
+      lastUserScrollRef.current = Date.now();
       const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
       stickRef.current = dist < 40;
     };
@@ -298,12 +304,20 @@ export default function ChatView({ convKey }: { convKey: string }) {
 
   // 流式更新跟随：用 useLayoutEffect（paint 前同步滚动）消除「先渲染增高再回拉」
   // 造成的抖动，并用 rAF 合并同一帧内的多次内容更新，避免高频 setScrollTop。
+  // 用户刚滚动过（300ms 内）时让位，不打断其阅读位置。
   useLayoutEffect(() => {
     const el = timelineRef.current;
     if (!el || !stickRef.current) return;
+    if (Date.now() - lastUserScrollRef.current < 300) return;
     const raf = requestAnimationFrame(() => {
       const cur = timelineRef.current;
-      if (cur && stickRef.current) cur.scrollTop = cur.scrollHeight;
+      if (
+        cur &&
+        stickRef.current &&
+        Date.now() - lastUserScrollRef.current >= 300
+      ) {
+        cur.scrollTop = cur.scrollHeight;
+      }
     });
     return () => cancelAnimationFrame(raf);
   }, [liveSignature]);
@@ -312,7 +326,9 @@ export default function ChatView({ convKey }: { convKey: string }) {
   // 用户已上滚（stickRef=false）时不打断其阅读位置，也不强制重置跟随状态。
   useLayoutEffect(() => {
     const el = timelineRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+    if (!el || !stickRef.current) return;
+    if (Date.now() - lastUserScrollRef.current < 300) return;
+    el.scrollTop = el.scrollHeight;
   }, [turns.length]);
 
   if (turns.length === 0) {

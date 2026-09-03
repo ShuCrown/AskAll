@@ -1504,13 +1504,22 @@ export async function runAutomation(
         if (!el) {
           // 已捕获过内容后连续找不到增长块（元素跟踪失效/站点替换 DOM）：
           // 死等本策略超时会拖住整条观察链，尽快交棒给 observe:selector/
-          // observe:text 继续抓取完整回答。
+          // observe:text 继续抓取完整回答。交棒前必须补发完成信号——
+          // 否则已捕获过内容却因停滞退出时，后续策略会把「已完成的稳定回答」
+          // 当成基线、不再视为新内容，面板会一直停在「回复中」。
+          // 注意：这里不能清空 lastText（只重置稳定计时），否则交棒时已无文本可发。
           if (sawReply && stalledSince === null) stalledSince = Date.now();
           if (stalledSince !== null && Date.now() - stalledSince > stallGiveUpMs) {
-            finish(false);
+            if (sawReply && lastText) {
+              send({
+                type: 'AI_REPLY_DONE',
+                text: lastText,
+                url: location.href,
+              });
+            }
+            finish(sawReply && !!lastText);
             return;
           }
-          lastText = '';
           stableSince = Date.now();
           return;
         }
@@ -1608,7 +1617,10 @@ export async function runAutomation(
         }
         const cur = extract();
         if (cur.length === 0) {
-          lastText = '';
+          // 元素短暂清空（站点重渲染/元素被替换）时不能清空 lastText：
+          // 否则超时补发 DONE 的条件（sawNew && lastText）会因 lastText 被清空
+          // 而落空，面板停在「回复中」。只重置稳定计时，避免元素消失期间
+          // 误判「已稳定」而提前完成。
           stableSince = Date.now();
           return;
         }

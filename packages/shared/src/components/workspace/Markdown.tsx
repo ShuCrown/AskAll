@@ -10,6 +10,10 @@
  */
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+// 保留回答中的单个换行（CommonMark 默认把单个 \n 折叠成空格，
+// 而 AI 站点原页面按换行展示）。AI 回答普遍用单换行分段，
+// 需要 remark-breaks 把 \n 渲染为 <br> 才能与原页面一致。
+import remarkBreaks from 'remark-breaks';
 import { cn } from '../../lib/utils';
 
 const textOf = (children: unknown): string =>
@@ -118,7 +122,10 @@ export default function Markdown({
         clamped && 'line-clamp-[8] overflow-hidden',
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={components}
+      >
         {text}
       </ReactMarkdown>
     </div>

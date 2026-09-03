@@ -73,8 +73,9 @@ export default function AiAnswerCard({
   const needCollapse = lines > COLLAPSE_LINES || text.length > 480;
 
   return (
-    // h-full：田字格同行卡片以最高者为准等高占满（外层 wrapper 已随 grid 行高拉伸）
-    <div className="flex h-full min-w-0 flex-col rounded-md border bg-card">
+    // h-full：田字格同行卡片以最高者为准等高占满（外层 wrapper 已随 grid 行高拉伸）；
+    // max-h：限制单卡最大高度，超长回答在正文区内部滚动，避免卡片过高。
+    <div className="flex h-full min-w-0 max-h-[320px] flex-col rounded-md border bg-card">
       {/* 头部：图标 + 名称 + 状态徽章 + 操作 */}
       <div className="flex items-center justify-between gap-2 border-b px-2.5 py-1.5">
         <span className="flex min-w-0 items-center gap-1.5">
@@ -113,8 +114,9 @@ export default function AiAnswerCard({
         </span>
       </div>
 
-      {/* 正文（flex-1：填满卡片剩余高度，配合 h-full 等高） */}
-      <div className="flex-1 px-2.5 py-2">
+      {/* 正文（flex-1：填满卡片剩余高度，配合 h-full 等高；min-h-0：卡片达 max-h 时可压缩，
+          内部文本区 overflow-y-auto 承接超长内容滚动，底部操作条始终可见） */}
+      <div className="min-h-0 flex-1 px-2.5 py-2">
         {fallback ? (
           <div className="flex flex-col gap-1.5">
             <p className="text-xs leading-relaxed text-amber-700">
@@ -132,8 +134,8 @@ export default function AiAnswerCard({
           </div>
         ) : text ? (
           <div className="flex h-full flex-col">
-            {/* 文本区：Markdown 渲染贴近 AI 原站点；占满剩余空间，让底部操作固定贴底 */}
-            <div className="min-h-0 flex-1">
+            {/* 文本区：Markdown 渲染贴近 AI 原站点；占满剩余空间，超长时内部滚动 */}
+            <div className="min-h-0 flex-1 overflow-y-auto">
               <Markdown
                 text={text}
                 clamped={!expanded && needCollapse}
